@@ -495,6 +495,7 @@ export const jsonDb = {
 
     // Sort transactions by date desc and limit to 5
     const recent = [...data.transactions]
+      .filter((transaction) => transaction.date && transaction.date.slice(0, 7) === month)
       .sort((a, b) => new Date(b.date) - new Date(a.date))
       .slice(0, 5);
 

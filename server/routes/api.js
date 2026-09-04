@@ -12,8 +12,31 @@ import { jsonDb } from '../services/jsonDbService.js';
 import { generateForecast } from '../services/forecastService.js';
 import Subscription from '../models/Subscription.js';
 import { detectRecurringPayments, checkAndLogDueSubscriptions } from '../services/subscriptionService.js';
+import { authenticate, login } from '../middleware/auth.js';
 
 const router = express.Router();
+
+router.post('/auth/login', login);
+router.use(authenticate);
+
+router.use((req, res, next) => {
+  const monthValues = [req.query.month, req.body?.month];
+  if (monthValues.some((month) => month !== undefined && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month))) {
+    return res.status(400).json({ error: 'Month must use YYYY-MM format' });
+  }
+  const amountValues = [req.body?.amount, req.body?.limit];
+  if (amountValues.some((amount) => amount !== undefined && (!Number.isFinite(Number(amount)) || Number(amount) <= 0))) {
+    return res.status(400).json({ error: 'Amounts must be positive finite numbers' });
+  }
+  if (typeof req.query.search === 'string' && req.query.search.length > 100) {
+    return res.status(400).json({ error: 'Search text is too long' });
+  }
+  next();
+});
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // Setup Multer for receipt uploads
 const __filename = fileURLToPath(import.meta.url);
@@ -67,9 +90,9 @@ router.get('/transactions', async (req, res) => {
 
     if (search) {
       query.$or = [
-        { description: { $regex: search, $options: 'i' } },
-        { merchant: { $regex: search, $options: 'i' } },
-        { notes: { $regex: search, $options: 'i' } }
+        { description: { $regex: escapeRegex(search), $options: 'i' } },
+        { merchant: { $regex: escapeRegex(search), $options: 'i' } },
+        { notes: { $regex: escapeRegex(search), $options: 'i' } }
       ];
     }
 
@@ -300,7 +323,9 @@ router.get('/dashboard/stats', async (req, res) => {
     });
 
     // Recent 5 transactions
-    const recentTransactions = await Transaction.find()
+    const recentTransactions = await Transaction.find({
+      date: { $gte: start, $lt: end }
+    })
       .sort({ date: -1 })
       .limit(5);
 
@@ -382,7 +407,7 @@ router.post('/ocr/scan', upload.single('receipt'), async (req, res) => {
 
     // Relativize path for frontend usage
     const filename = path.basename(filePath);
-    const receiptUrl = `/uploads/${filename}`;
+    const receiptUrl = `/api/uploads/${filename}`;
 
     res.json({
       ...scanResult,
@@ -392,6 +417,13 @@ router.post('/ocr/scan', upload.single('receipt'), async (req, res) => {
     console.error('OCR Route error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+router.get('/uploads/:filename', (req, res) => {
+  const filename = path.basename(req.params.filename);
+  const filePath = path.join(uploadsDir, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Receipt not found' });
+  res.sendFile(filePath);
 });
 
 // --- FINANCIAL ADVISOR API ---
@@ -575,6 +607,11 @@ router.get('/subscriptions', async (req, res) => {
 router.post('/subscriptions', async (req, res) => {
   try {
     if (mongoose.connection.readyState !== 1) {
+      if (req.body._id) {
+        const updated = await jsonDb.updateSubscription(req.body._id, req.body);
+        if (!updated) return res.status(404).json({ error: 'Subscription not found' });
+        return res.json(updated);
+      }
       const sub = await jsonDb.createSubscription(req.body);
       return res.status(201).json(sub);
     }
@@ -599,7 +636,8 @@ router.post('/subscriptions', async (req, res) => {
       });
       await sub.save();
     }
-    res.status(201).json(sub);
+    if (!sub) return res.status(404).json({ error: 'Subscription not found' });
+    res.status(_id ? 200 : 201).json(sub);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { TrendingUp, Sparkles, Check, AlertCircle, Calendar, ArrowUpRight, ArrowDownRight, IndianRupee } from 'lucide-react';
 import { Line } from 'react-chartjs-2';
+import { sanitizeHtml } from '../utils/sanitizeHtml';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 
 ChartJS.register(
@@ -373,7 +374,7 @@ export default function Forecast() {
           </h3>
           <div 
             style={{ flexGrow: 1, overflowY: 'auto', maxHeight: '300px', fontSize: '13px', lineHeight: '1.6' }}
-            dangerouslySetInnerHTML={{ __html: forecast.insights }} 
+            dangerouslySetInnerHTML={{ __html: sanitizeHtml(forecast.insights) }}
           />
         </div>
 

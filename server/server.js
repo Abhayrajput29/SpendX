@@ -18,15 +18,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Middlewares
-app.use(cors());
+app.use(cors(process.env.CLIENT_ORIGIN ? { origin: process.env.CLIENT_ORIGIN } : undefined));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded receipts statically
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
 // Mount API routes
 app.use('/api', apiRoutes);
+
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../client/dist')));
+  app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../client/dist/index.html')));
+}
 
 // Root health check endpoint
 app.get('/health', (req, res) => {
@@ -44,7 +46,7 @@ console.log('Attempting to connect to MongoDB...');
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('=== MongoDB Connected Successfully ===');
-    seedDatabase();
+    if (process.env.NODE_ENV !== 'production') seedDatabase();
     checkAndLogDueSubscriptions(false)
       .then(res => console.log(`=== Subscriptions scheduler (MongoDB) logged ${res.loggedTransactionsCount} due entries ===`))
       .catch(err => console.error(err));

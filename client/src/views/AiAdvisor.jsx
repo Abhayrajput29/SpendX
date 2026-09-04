@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Send, Loader2, Bot } from 'lucide-react';
+import { Sparkles, Send, Loader2 } from 'lucide-react';
+import { sanitizeHtml } from '../utils/sanitizeHtml';
 
 export default function AiAdvisor() {
   const [messages, setMessages] = useState([]);
@@ -125,7 +126,7 @@ export default function AiAdvisor() {
               {msg.sender === 'user' ? (
                 <div>{msg.text}</div>
               ) : (
-                <div dangerouslySetInnerHTML={{ __html: msg.html }} />
+                <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(msg.html) }} />
               )}
             </div>
           ))}

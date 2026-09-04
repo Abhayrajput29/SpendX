@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ScanLine, Receipt, PiggyBank,
@@ -13,6 +13,43 @@ import Forecast     from './views/Forecast';
 import Subscriptions from './views/Subscriptions';
 
 export default function App() {
+  const [token, setToken] = useState(() => localStorage.getItem('spendx_token'));
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  async function signIn(event) {
+    event.preventDefault();
+    setError('');
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      setError(result.error || 'Unable to sign in');
+      return;
+    }
+    localStorage.setItem('spendx_token', result.token);
+    setToken(result.token);
+  }
+
+  if (!token) {
+    return (
+      <main className="auth-page">
+        <form className="auth-form" onSubmit={signIn}>
+          <div className="logo-container"><div className="logo-icon"><Zap size={18} fill="currentColor" /></div><span className="logo-text">FinanceAI</span></div>
+          <h1>Sign in to your finance workspace</h1>
+          <p>Use the password configured in <code>server/.env</code>.</p>
+          <label htmlFor="app-password">Workspace password</label>
+          <input id="app-password" type="password" minLength="8" value={password} onChange={(event) => setPassword(event.target.value)} required />
+          {error && <p role="alert" className="form-error">{error}</p>}
+          <button type="submit">Sign in</button>
+        </form>
+      </main>
+    );
+  }
+
   return (
     <BrowserRouter>
       <div className="app-container">

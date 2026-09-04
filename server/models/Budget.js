@@ -8,11 +8,14 @@ const BudgetSchema = new mongoose.Schema({
   },
   limit: {
     type: Number,
-    required: true
+    required: true,
+    min: 0.01,
+    validate: Number.isFinite
   },
   month: {
     type: String,
-    required: true, // Formatted as YYYY-MM (e.g. '2026-06')
+    required: true,
+    match: /^\d{4}-(0[1-9]|1[0-2])$/
   }
 }, {
   timestamps: true

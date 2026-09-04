@@ -8,7 +8,9 @@ const SubscriptionSchema = new mongoose.Schema({
   },
   amount: {
     type: Number,
-    required: true
+    required: true,
+    min: 0.01,
+    validate: Number.isFinite
   },
   category: {
     type: String,

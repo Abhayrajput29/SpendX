@@ -1,5 +1,14 @@
 import { generateContentWithRetry, getTextModel, getJsonModel } from '../utils/geminiClient.js';
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
 // ---------------------------------------------------------------------------
 // Standard expense categories (single source of truth)
 // ---------------------------------------------------------------------------
@@ -226,7 +235,7 @@ export async function getFinancialAdvisorInsights(transactions, budgets, questio
     html += '</ul>';
 
     if (question) {
-      html += `<div class="chat-response"><p><strong>Q: ${question}</strong></p><p><em>Notice: Full chat support requires a GEMINI_API_KEY.</em></p></div>`;
+      html += `<div class="chat-response"><p><strong>Q: ${escapeHtml(question)}</strong></p><p><em>Notice: Full chat support requires a GEMINI_API_KEY.</em></p></div>`;
     }
     return html;
   }

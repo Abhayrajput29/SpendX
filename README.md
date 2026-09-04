@@ -25,7 +25,7 @@ Finance AI Expense Tracker is a full-stack personal-finance dashboard for record
 
 Install these before starting:
 
-- Node.js 18 or newer, with npm
+- Node.js 20 or newer, with npm
 - Git
 - MongoDB 7 or newer, either running locally or a MongoDB Atlas connection string
 - A Gemini API key if you want AI features. The application still runs with local fallback logic without one.
@@ -71,6 +71,12 @@ cd ..
 Create a file named `server/.env`. Do not commit this file or share its contents.
 
 ```env
+# Required: password used by the app sign-in screen
+APP_PASSWORD=choose-a-password-at-least-8-characters-long
+
+# Required in production: long random value used to sign session tokens
+AUTH_SECRET=replace-with-a-long-random-secret
+
 # Optional: defaults to the local database below
 MONGODB_URI=mongodb://127.0.0.1:27017/expense_tracker
 
@@ -80,6 +86,14 @@ GEMINI_API_KEY=your_gemini_api_key_here
 # Optional: defaults to 5001
 PORT=5001
 ```
+
+You can start from the included template:
+
+```bash
+cp server/.env.example server/.env
+```
+
+Change `APP_PASSWORD` and `AUTH_SECRET` before starting. The application is single-owner by design: the password protects one private workspace. Do not use a shared password for multiple people or expose this prototype directly to the public internet without adding a real multi-user identity system.
 
 ### Getting a Gemini API key
 
@@ -111,7 +125,9 @@ This starts both processes:
 - Backend: http://localhost:5001
 - Backend health check: http://localhost:5001/health
 
-Open the frontend URL in your browser. The Vite development server proxies `/api` and `/uploads` requests to the backend, so the browser does not need a separate API URL configuration.
+Open the frontend URL in your browser. The Vite development server proxies `/api` requests to the backend, so the browser does not need a separate API URL configuration.
+
+The first screen asks for the `APP_PASSWORD` configured in `server/.env`. API requests use a signed bearer token, and uploaded receipts are served only through authenticated API requests.
 
 You can also run each process separately in two terminals:
 
@@ -162,6 +178,8 @@ Run these commands from `client`:
 | `npm run build` | Create a production frontend build in `client/dist` |
 | `npm run lint` | Run Oxlint |
 | `npm run preview` | Preview the production frontend build |
+
+Run backend tests from `server` with `npm test`.
 
 ## Project Structure
 

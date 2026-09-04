@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { IndianRupee, Receipt, PiggyBank, Sparkles, Plus, ArrowRight, Wallet } from 'lucide-react';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Title } from 'chart.js';
 import { Doughnut, Bar } from 'react-chartjs-2';
+import { sanitizeHtml } from '../utils/sanitizeHtml';
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Title);
 
@@ -342,7 +343,7 @@ export default function Dashboard() {
                 <div style={{ height: '14px', background: 'rgba(255, 255, 255, 0.05)', borderRadius: '4px', width: '60%', animation: 'pulse 1.5s infinite' }}></div>
               </div>
             ) : (
-              <div dangerouslySetInnerHTML={{ __html: aiInsight }} />
+              <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(aiInsight) }} />
             )}
           </div>
 
