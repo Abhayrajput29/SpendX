@@ -1,0 +1,19 @@
+# Dependencies and build output
+node_modules/
+dist/
+client/dist/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime files
+server/uploads/
+server/data/db.json
+
+# Logs and local OS/editor files
+*.log
+.DS_Store
+.vscode/
+!.vscode/extensions.json
