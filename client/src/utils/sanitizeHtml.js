@@ -3,7 +3,7 @@ const allowedTags = new Set(['H4', 'P', 'UL', 'OL', 'LI', 'STRONG', 'EM', 'SPAN'
 export function sanitizeHtml(value = '') {
   if (typeof window === 'undefined') return '';
   const parsed = new DOMParser().parseFromString(String(value), 'text/html');
-  parsed.querySelectorAll('*').forEach((element) => {
+  parsed.body.querySelectorAll('*').forEach((element) => {
     if (!allowedTags.has(element.tagName)) {
       element.replaceWith(...element.childNodes);
       return;
