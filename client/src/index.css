@@ -1012,23 +1012,42 @@ tr:hover td { background-color: var(--bg-card-hover); }
 /* ── Auth Pages (InsideBox Style Clean Modern Layout) ───────── */
 .auth-container {
   min-height: 100vh;
+  width: 100%;
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   background: var(--bg-app);
+  position: relative;
+  padding: 80px 24px;
+  box-sizing: border-box;
   transition: background var(--t-smooth);
 }
 
+/* Pinned Top Navigation Bar */
 .auth-top-header {
-  padding: 28px 44px;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 28px 48px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  z-index: 50;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.auth-brand,
+.auth-top-header .theme-toggle-btn {
+  pointer-events: auto;
 }
 
 .auth-brand {
   display: flex;
   align-items: center;
   gap: 12px;
+  text-decoration: none;
   user-select: none;
 }
 
@@ -1048,27 +1067,27 @@ tr:hover td { background-color: var(--bg-card-hover); }
 }
 
 .auth-card-wrapper {
-  flex: 1;
+  width: 100%;
+  max-width: 440px;
+  margin: auto;
   display: flex;
-  align-items: center;
   justify-content: center;
-  padding: 24px;
 }
 
 .auth-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: 16px;
-  padding: 44px 40px;
+  padding: 44px 38px;
   width: 100%;
-  max-width: 440px;
   box-shadow: 0 4px 25px -4px rgba(0, 0, 0, 0.05), 0 10px 10px -5px rgba(0, 0, 0, 0.02);
-  transition: background var(--t-smooth), border-color var(--t-smooth);
-  animation: scaleIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transition: background var(--t-smooth), border-color var(--t-smooth), box-shadow var(--t-smooth);
+  box-sizing: border-box;
 }
 
 .auth-header-texts {
   margin-bottom: 26px;
+  text-align: left;
 }
 
 .auth-subtitle {
@@ -1076,22 +1095,23 @@ tr:hover td { background-color: var(--bg-card-hover); }
   color: var(--text-muted);
   font-weight: 400;
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .auth-title {
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 700;
   color: var(--text-primary);
-  letter-spacing: -0.5px;
+  letter-spacing: -0.8px;
   margin: 0;
-  line-height: 1.2;
+  line-height: 1.15;
 }
 
 .auth-form {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  width: 100%;
 }
 
 .auth-field {
@@ -1101,7 +1121,8 @@ tr:hover td { background-color: var(--bg-card-hover); }
 
 .auth-input-modern {
   width: 100%;
-  padding: 12px 16px;
+  height: 48px;
+  padding: 0 16px;
   font-size: 14px;
   font-family: var(--font-sans);
   background: var(--bg-input);
@@ -1109,7 +1130,7 @@ tr:hover td { background-color: var(--bg-card-hover); }
   border: 1px solid var(--border-color);
   border-radius: 8px;
   outline: none;
-  transition: all 0.2s ease;
+  transition: border-color 0.2s, box-shadow 0.2s;
   box-sizing: border-box;
 }
 
@@ -1125,15 +1146,18 @@ tr:hover td { background-color: var(--bg-card-hover); }
 .auth-password-field {
   display: flex;
   align-items: center;
+  position: relative;
 }
 
 .auth-password-field .auth-input-modern {
-  padding-right: 44px;
+  padding-right: 46px;
 }
 
 .auth-eye-btn {
   position: absolute;
   right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -1156,6 +1180,7 @@ tr:hover td { background-color: var(--bg-card-hover); }
   justify-content: space-between;
   font-size: 13.5px;
   margin: 2px 0 4px 0;
+  width: 100%;
 }
 
 .auth-remember-label {
@@ -1192,26 +1217,28 @@ tr:hover td { background-color: var(--bg-card-hover); }
 
 .auth-btn-primary {
   width: 100%;
-  padding: 12px;
+  height: 48px;
   background: #2563eb;
   color: #ffffff;
   border: none;
   border-radius: 8px;
-  font-size: 14.5px;
+  font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, transform 0.15s;
   margin-top: 4px;
+  box-sizing: border-box;
 }
 
 .auth-btn-primary:hover:not(:disabled) {
   background: #1d4ed8;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px -2px rgba(37, 99, 235, 0.4);
 }
 
 .auth-btn-primary:active:not(:disabled) {
-  transform: translateY(0);
+  transform: scale(0.99);
 }
 
 .auth-btn-primary:disabled {
@@ -1221,11 +1248,11 @@ tr:hover td { background-color: var(--bg-card-hover); }
 
 .auth-btn-google {
   width: 100%;
-  padding: 11px;
+  height: 48px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 500;
   color: var(--text-primary);
   cursor: pointer;
@@ -1233,12 +1260,12 @@ tr:hover td { background-color: var(--bg-card-hover); }
   align-items: center;
   justify-content: center;
   gap: 10px;
-  transition: all 0.2s ease;
+  transition: background 0.2s, border-color 0.2s;
+  box-sizing: border-box;
 }
 
 .auth-btn-google:hover {
   background: var(--bg-card-hover);
-  border-color: var(--border-hover);
 }
 
 .auth-error-banner {
@@ -1286,12 +1313,18 @@ tr:hover td { background-color: var(--bg-card-hover); }
   text-decoration: underline;
 }
 
-@media (max-width: 480px) {
+@media (max-width: 640px) {
+  .auth-container {
+    padding: 90px 16px 32px;
+  }
   .auth-top-header {
-    padding: 20px 24px;
+    padding: 20px 20px;
   }
   .auth-card {
-    padding: 32px 24px;
+    padding: 32px 22px;
+  }
+  .auth-title {
+    font-size: 26px;
   }
 }
 
