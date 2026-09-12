@@ -224,6 +224,33 @@ Stop the process using the port. The backend port can be changed with `PORT` in 
 
 Use a clear JPG, JPEG, or PNG receipt under 5 MB. Ensure the backend is running and that `server/eng.traineddata` is present.
 
+## Deployment to Vercel
+
+This repository includes [`vercel.json`](./vercel.json) and a serverless API adapter ([`api/index.js`](./api/index.js)) for full-stack deployment on [Vercel](https://vercel.com).
+
+### 1. Push to GitHub
+Ensure all changes are pushed to your `main` branch.
+
+### 2. Import into Vercel
+1. Log in to [vercel.com](https://vercel.com) and click **Add New...** → **Project**.
+2. Select your repository (`SpendX`).
+3. Leave **Root Directory** as `./`.
+
+### 3. Set Environment Variables
+In Project Settings → Environment Variables, add:
+
+- `MONGODB_URI`: Your MongoDB Atlas URI (`mongodb+srv://...`)
+- `GEMINI_API_KEY`: Google Gemini API key
+- `GEMINI_MODEL`: `gemini-1.5-flash`
+- `AUTH_SECRET`: Random 32+ character JWT secret string
+- `APP_PASSWORD`: Admin password for authentication
+- `NODE_ENV`: `production`
+
+> **Note**: In MongoDB Atlas Network Access, ensure IP `0.0.0.0/0` (Allow Access from Anywhere) is enabled so Vercel's dynamic serverless functions can connect.
+
+### 4. Deploy
+Click **Deploy**. Vercel will build the frontend and serve both the static Vite app and the `/api` serverless backend on the same domain.
+
 ## Security Notes
 
 - Never commit `server/.env`, API keys, passwords, or database credentials.
