@@ -39,7 +39,7 @@ function linearRegression(points) {
  * @param {Array} budgets
  * @returns {Promise<object>} Forecast bundle
  */
-export async function generateForecast(transactions, budgets) {
+export async function generateForecast(transactions = [], budgets = []) {
   const now = new Date();
 
   // Build last-12-months structure

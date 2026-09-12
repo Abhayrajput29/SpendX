@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "buildCommand": "npm run build:client",
+  "outputDirectory": "client/dist",
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/((?!api/|assets/|favicon.ico|.*\\..*).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/subscriptions/run-scheduler",
+      "schedule": "0 0 * * *"
+    }
+  ]
+}

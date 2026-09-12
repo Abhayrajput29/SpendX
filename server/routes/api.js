@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import mongoose from 'mongoose';
 import Transaction from '../models/Transaction.js';
@@ -11,13 +12,19 @@ import { scanReceipt } from '../services/ocrService.js';
 import { jsonDb } from '../services/jsonDbService.js';
 import { generateForecast } from '../services/forecastService.js';
 import Subscription from '../models/Subscription.js';
+import Goal from '../models/Goal.js';
 import { detectRecurringPayments, checkAndLogDueSubscriptions } from '../services/subscriptionService.js';
-import { authenticate, login } from '../middleware/auth.js';
+import { authenticate, login, register, getCurrentUser, validateUsername, validateEmail } from '../middleware/auth.js';
 
 const router = express.Router();
 
+router.post('/auth/register', register);
 router.post('/auth/login', login);
+router.post('/auth/validate-username', validateUsername);
+router.post('/auth/validate-email', validateEmail);
+
 router.use(authenticate);
+router.get('/auth/me', getCurrentUser);
 
 router.use((req, res, next) => {
   const monthValues = [req.query.month, req.body?.month];
@@ -38,13 +45,18 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Setup Multer for receipt uploads
+// Setup Multer for receipt uploads (safe for both local filesystem and serverless /tmp)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const uploadsDir = path.join(__dirname, '../uploads');
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const uploadsDir = isServerless ? path.join(os.tmpdir(), 'spendx_uploads') : path.join(__dirname, '../uploads');
 
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+  try {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  } catch (err) {
+    console.warn('Notice: Could not pre-create uploads directory:', err.message);
+  }
 }
 
 const storage = multer.diskStorage({
@@ -59,15 +71,15 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png/;
+    const allowedTypes = /jpeg|jpg|png|webp|avif|heic/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-    if (extname && mimetype) {
+    const mimetype = allowedTypes.test(file.mimetype) || file.mimetype.startsWith('image/');
+    if (extname || mimetype) {
       cb(null, true);
     } else {
-      cb(new Error('Only JPG, JPEG, and PNG images are allowed!'));
+      cb(new Error('Only JPG, JPEG, PNG, WEBP, and AVIF receipt images are allowed!'));
     }
   }
 });
@@ -81,7 +93,7 @@ router.get('/transactions', async (req, res) => {
       const transactions = await jsonDb.getTransactions(req.query);
       return res.json(transactions);
     }
-    const { category, search, month } = req.query;
+    const { category, search, month, sortBy } = req.query;
     let query = {};
 
     if (category) {
@@ -113,7 +125,18 @@ router.get('/transactions', async (req, res) => {
       query.date = { $gte: start, $lt: end };
     }
 
-    const transactions = await Transaction.find(query).sort({ date: -1 });
+    let sortObj = { date: -1 };
+    if (sortBy === 'createdAt') {
+      sortObj = { createdAt: -1 };
+    } else if (sortBy === 'dateAsc') {
+      sortObj = { date: 1 };
+    } else if (sortBy === 'amountDesc') {
+      sortObj = { amount: -1 };
+    } else if (sortBy === 'amountAsc') {
+      sortObj = { amount: 1 };
+    }
+
+    const transactions = await Transaction.find(query).sort(sortObj);
     res.json(transactions);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -127,7 +150,7 @@ router.post('/transactions', async (req, res) => {
       const transaction = await jsonDb.createTransaction(req.body);
       return res.status(201).json(transaction);
     }
-    const { description, amount, date, paymentMethod, merchant, tags, notes, category } = req.body;
+    const { description, amount, date, paymentMethod, merchant, tags, notes, category, receiptUrl } = req.body;
 
     let finalCategory = category;
     let isAuto = false;
@@ -154,6 +177,7 @@ router.post('/transactions', async (req, res) => {
       paymentMethod: paymentMethod || 'Cash',
       category: finalCategory,
       merchant: finalMerchant,
+      receiptUrl: receiptUrl || '',
       tags: tags || [],
       notes: notes || '',
       isAutoCategorized: isAuto
@@ -421,7 +445,10 @@ router.post('/ocr/scan', upload.single('receipt'), async (req, res) => {
 
 router.get('/uploads/:filename', (req, res) => {
   const filename = path.basename(req.params.filename);
-  const filePath = path.join(uploadsDir, filename);
+  let filePath = path.join(uploadsDir, filename);
+  if (!fs.existsSync(filePath)) {
+    filePath = path.join(__dirname, '../uploads', filename);
+  }
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Receipt not found' });
   res.sendFile(filePath);
 });
@@ -431,14 +458,13 @@ router.get('/uploads/:filename', (req, res) => {
 // Get AI Insights or chat response
 router.post('/advisor/chat', async (req, res) => {
   try {
-    const { month, question } = req.body;
-    if (!month) {
-      return res.status(400).json({ error: 'month parameter is required (YYYY-MM)' });
-    }
+    const currentMonthDefault = new Date().toISOString().slice(0, 7);
+    const month = req.body.month || currentMonthDefault;
+    const question = req.body.question || req.body.message || req.body.prompt || null;
 
     const start = new Date(`${month}-01T00:00:00.000Z`);
-    const year = parseInt(month.split('-')[0]);
-    const m = parseInt(month.split('-')[1]);
+    const year = parseInt(month.split('-')[0]) || new Date().getFullYear();
+    const m = parseInt(month.split('-')[1]) || (new Date().getMonth() + 1);
     
     let end;
     if (m === 12) {
@@ -454,16 +480,28 @@ router.post('/advisor/chat', async (req, res) => {
       transactions = await jsonDb.getTransactions({ month });
       budgets = await jsonDb.getBudgets(month);
     } else {
-      transactions = await Transaction.find({
-        date: { $gte: start, $lt: end }
-      });
+      transactions = await Transaction.find({ date: { $gte: start, $lt: end } });
       budgets = await Budget.find({ month });
+    }
+
+    // If the current month has no data, supplement with recent all-time transactions
+    // so the AI always has meaningful context to analyse
+    if (transactions.length === 0) {
+      if (mongoose.connection.readyState !== 1) {
+        const allTx = await jsonDb.getTransactions({});
+        transactions = allTx.slice(-50); // last 50 across all time
+      } else {
+        transactions = await Transaction.find().sort({ date: -1 }).limit(50);
+      }
     }
 
     const htmlInsights = await getFinancialAdvisorInsights(transactions, budgets, question);
     res.json({ html: htmlInsights });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Advisor error:', error);
+    // Always return a valid response — never crash with a bare 500
+    const fallbackHtml = `<p>The advisor encountered an unexpected error: <strong>${error.message || 'Unknown error'}</strong>. Please try again in a moment.</p>`;
+    res.status(200).json({ html: fallbackHtml });
   }
 });
 
@@ -654,6 +692,142 @@ router.delete('/subscriptions/:id', async (req, res) => {
     const sub = await Subscription.findByIdAndDelete(req.params.id);
     if (!sub) return res.status(404).json({ error: 'Subscription not found' });
     res.json({ message: 'Subscription deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// --- SAVINGS GOALS API ---
+
+// Get all goals
+router.get('/goals', async (req, res) => {
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      const goals = await jsonDb.getGoals();
+      return res.json(goals);
+    }
+    const goals = await Goal.find().sort({ createdAt: -1 });
+    res.json(goals);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create new goal
+router.post('/goals', async (req, res) => {
+  try {
+    const { name, targetAmount, currentAmount, targetDate, frequency, contributionAmount, category, color, notes } = req.body;
+    if (!name || !targetAmount || !targetDate) {
+      return res.status(400).json({ error: 'Name, target amount, and target date are required' });
+    }
+
+    const payload = {
+      name,
+      targetAmount: Number(targetAmount),
+      currentAmount: Number(currentAmount || 0),
+      targetDate,
+      frequency: frequency || 'Monthly',
+      contributionAmount: Number(contributionAmount || 0),
+      category: category || 'General',
+      color: color || '#866ec7',
+      notes: notes || '',
+      isCompleted: Number(currentAmount || 0) >= Number(targetAmount)
+    };
+
+    if (mongoose.connection.readyState !== 1) {
+      const goal = await jsonDb.createGoal(payload);
+      return res.status(201).json(goal);
+    }
+
+    const goal = await Goal.create(payload);
+    res.status(201).json(goal);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Update goal (including contributing funds)
+router.put('/goals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = { ...req.body };
+
+    if (updates.targetAmount) updates.targetAmount = Number(updates.targetAmount);
+    if (updates.currentAmount !== undefined) updates.currentAmount = Number(updates.currentAmount);
+    if (updates.contributionAmount !== undefined) updates.contributionAmount = Number(updates.contributionAmount);
+
+    if (updates.targetAmount && updates.currentAmount !== undefined) {
+      updates.isCompleted = updates.currentAmount >= updates.targetAmount;
+    }
+
+    if (mongoose.connection.readyState !== 1) {
+      const updated = await jsonDb.updateGoal(id, updates);
+      if (!updated) return res.status(404).json({ error: 'Goal not found' });
+      return res.json(updated);
+    }
+
+    const goal = await Goal.findById(id);
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+
+    Object.assign(goal, updates);
+    if (goal.currentAmount >= goal.targetAmount) {
+      goal.isCompleted = true;
+    }
+    await goal.save();
+    res.json(goal);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Contribute funds to a goal
+router.post('/goals/:id/contribute', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { amount } = req.body;
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({ error: 'Valid contribution amount is required' });
+    }
+
+    const addVal = Number(amount);
+
+    if (mongoose.connection.readyState !== 1) {
+      const goals = await jsonDb.getGoals();
+      const target = goals.find(g => g._id === id);
+      if (!target) return res.status(404).json({ error: 'Goal not found' });
+      const newAmount = (target.currentAmount || 0) + addVal;
+      const updated = await jsonDb.updateGoal(id, { currentAmount: newAmount });
+      return res.json(updated);
+    }
+
+    const goal = await Goal.findById(id);
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+
+    goal.currentAmount += addVal;
+    if (goal.currentAmount >= goal.targetAmount) {
+      goal.isCompleted = true;
+    }
+    await goal.save();
+    res.json(goal);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Delete goal
+router.delete('/goals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (mongoose.connection.readyState !== 1) {
+      const result = await jsonDb.deleteGoal(id);
+      if (!result) return res.status(404).json({ error: 'Goal not found' });
+      return res.json({ message: 'Goal deleted successfully' });
+    }
+
+    const goal = await Goal.findByIdAndDelete(id);
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+    res.json({ message: 'Goal deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

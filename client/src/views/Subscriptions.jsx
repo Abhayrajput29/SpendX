@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   CalendarRange, Sparkles, Check, AlertCircle, Plus, Trash2, 
-  Play, Pause, Calendar, Info, IndianRupee, Tv, Wifi, Car, 
+  Play, Pause, Calendar, IndianRupee, Tv, Wifi, Car,
   Utensils, ShoppingBag, HeartPulse, GraduationCap, Plane, 
   HelpCircle, Clock, CheckCircle2, AlertTriangle 
 } from 'lucide-react';
@@ -50,8 +50,6 @@ export default function Subscriptions() {
   const [subscriptions, setSubscriptions] = useState([]);
   const [candidates, setCandidates] = useState([]);
   const [avgMonthlySpent, setAvgMonthlySpent] = useState(42000);
-  const [loading, setLoading] = useState(true);
-  const [loadingDetect, setLoadingDetect] = useState(false);
   const [activeModal, setActiveModal] = useState(null); // 'subscription' | 'emi' | null
   const [submitting, setSubmitting] = useState(false);
   
@@ -74,7 +72,6 @@ export default function Subscriptions() {
 
   const fetchData = async () => {
     try {
-      setLoading(true);
       // Fetch Tracked Subscriptions
       const subsRes = await fetch('/api/subscriptions');
       if (subsRes.ok) {
@@ -103,7 +100,6 @@ export default function Subscriptions() {
       }
 
       // Fetch algorithmic detected subscriptions
-      setLoadingDetect(true);
       const detectRes = await fetch('/api/subscriptions/detect');
       if (detectRes.ok) {
         const detectData = await detectRes.json();
@@ -111,9 +107,6 @@ export default function Subscriptions() {
       }
     } catch (err) {
       console.error('Error fetching subscription data:', err);
-    } finally {
-      setLoading(false);
-      setLoadingDetect(false);
     }
   };
 

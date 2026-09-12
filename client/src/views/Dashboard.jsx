@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { IndianRupee, Receipt, PiggyBank, Sparkles, Plus, ArrowRight, Wallet } from 'lucide-react';
+import { IndianRupee, Receipt, Sparkles, Plus, ArrowRight, Wallet } from 'lucide-react';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Title } from 'chart.js';
 import { Doughnut, Bar } from 'react-chartjs-2';
 import { sanitizeHtml } from '../utils/sanitizeHtml';
@@ -34,7 +34,7 @@ export default function Dashboard() {
 
   const currentMonth = new Date().toISOString().slice(0, 7); // "YYYY-MM"
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       setLoadingStats(true);
       const res = await fetch(`/api/dashboard/stats?month=${currentMonth}`);
@@ -47,9 +47,9 @@ export default function Dashboard() {
     } finally {
       setLoadingStats(false);
     }
-  };
+  }, [currentMonth]);
 
-  const fetchAiInsight = async () => {
+  const fetchAiInsight = useCallback(async () => {
     try {
       setLoadingAi(true);
       const res = await fetch('/api/advisor/chat', {
@@ -69,9 +69,9 @@ export default function Dashboard() {
     } finally {
       setLoadingAi(false);
     }
-  };
+  }, [currentMonth]);
 
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async () => {
     try {
       setLoadingHistory(true);
       const res = await fetch('/api/dashboard/history');
@@ -84,13 +84,11 @@ export default function Dashboard() {
     } finally {
       setLoadingHistory(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchStats();
-    fetchAiInsight();
-    fetchHistory();
-  }, []);
+    void Promise.all([fetchStats(), fetchAiInsight(), fetchHistory()]);
+  }, [fetchAiInsight, fetchHistory, fetchStats]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;

@@ -1,14 +1,37 @@
-import React, { useState, useEffect } from 'react';
-import { Search, Filter, Calendar, Edit2, Trash2, Plus, Sparkles } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { Search, Filter, Calendar, Edit2, Trash2, Plus, Sparkles, ArrowUpDown, Receipt } from 'lucide-react';
 
 export default function Transactions() {
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   
-  // Filter states
-  const [search, setSearch] = useState('');
+  // Filter states — derived from URL params so navigation always syncs them
+  const [search, setSearch] = useState(() => searchParams.get('search') || '');
   const [category, setCategory] = useState('');
-  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [month, setMonth] = useState(() => {
+    const p = searchParams.get('month');
+    return (p === 'all' || p === '' || p === null) ? '' : p;
+  });
+  const [sortBy, setSortBy] = useState(() => searchParams.get('sortBy') || 'dateDesc');
+
+  // Sync filter state whenever the URL search params change (e.g. navigation from OCR scanner)
+  useEffect(() => {
+    const newSearch = searchParams.get('search') || '';
+    const monthParam = searchParams.get('month');
+    const newMonth = (monthParam === 'all' || monthParam === '' || monthParam === null)
+      ? ''
+      : monthParam;
+    const newSortBy = searchParams.get('sortBy') || 'dateDesc';
+
+    setSearch(newSearch);
+    setMonth(newMonth);
+    setSortBy(newSortBy);
+    // category is not in URL params, so leave it as-is
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
   
   // Modals
   const [showAddModal, setShowAddModal] = useState(false);
@@ -23,17 +46,19 @@ export default function Transactions() {
     paymentMethod: 'Cash',
     date: new Date().toISOString().split('T')[0],
     notes: '',
-    merchant: ''
+    merchant: '',
+    receiptUrl: ''
   });
   const [saving, setSaving] = useState(false);
 
-  const fetchTransactions = async () => {
+  const fetchTransactions = useCallback(async () => {
     try {
       setLoading(true);
       let queryParams = [];
       if (search) queryParams.push(`search=${encodeURIComponent(search)}`);
       if (category) queryParams.push(`category=${encodeURIComponent(category)}`);
-      if (month) queryParams.push(`month=${encodeURIComponent(month)}`);
+      if (month && month !== 'all') queryParams.push(`month=${encodeURIComponent(month)}`);
+      if (sortBy) queryParams.push(`sortBy=${encodeURIComponent(sortBy)}`);
 
       const queryStr = queryParams.length > 0 ? `?${queryParams.join('&')}` : '';
       const res = await fetch(`/api/transactions${queryStr}`);
@@ -46,11 +71,42 @@ export default function Transactions() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [category, month, search, sortBy]);
 
   useEffect(() => {
-    fetchTransactions();
-  }, [search, category, month]);
+    void fetchTransactions();
+  }, [fetchTransactions]);
+
+  // Keep URL in sync when filters change
+  const updateFilters = (newSearch, newCategory, newMonth, newSortBy) => {
+    const params = new URLSearchParams();
+    if (newSearch) params.set('search', newSearch);
+    if (newCategory) params.set('category', newCategory);
+    if (newMonth) params.set('month', newMonth);
+    else params.set('month', 'all');
+    if (newSortBy && newSortBy !== 'dateDesc') params.set('sortBy', newSortBy);
+    setSearchParams(params, { replace: true });
+  };
+
+  const handleSearchChange = (val) => {
+    setSearch(val);
+    updateFilters(val, category, month, sortBy);
+  };
+
+  const handleCategoryChange = (val) => {
+    setCategory(val);
+    updateFilters(search, val, month, sortBy);
+  };
+
+  const handleMonthChange = (val) => {
+    setMonth(val);
+    updateFilters(search, category, val, sortBy);
+  };
+
+  const handleSortChange = (val) => {
+    setSortBy(val);
+    updateFilters(search, category, month, val);
+  };
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -89,7 +145,8 @@ export default function Transactions() {
       paymentMethod: tx.paymentMethod || 'Cash',
       date: new Date(tx.date).toISOString().split('T')[0],
       notes: tx.notes || '',
-      merchant: tx.merchant || ''
+      merchant: tx.merchant || '',
+      receiptUrl: tx.receiptUrl || ''
     });
     setShowEditModal(true);
   };
@@ -118,8 +175,7 @@ export default function Transactions() {
   };
 
   const handleDeleteClick = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this transaction?')) return;
-    
+    if (!window.confirm('Are you sure you want to permanently delete this transaction record?')) return;
     try {
       const res = await fetch(`/api/transactions/${id}`, {
         method: 'DELETE'
@@ -140,13 +196,14 @@ export default function Transactions() {
       paymentMethod: 'Cash',
       date: new Date().toISOString().split('T')[0],
       notes: '',
-      merchant: ''
+      merchant: '',
+      receiptUrl: ''
     });
     setSelectedTx(null);
   };
 
-  const getBadgeClass = (category) => {
-    const cat = category.toLowerCase();
+  const getBadgeClass = (catName) => {
+    const cat = (catName || '').toLowerCase();
     if (cat.includes('food')) return 'badge-food';
     if (cat.includes('transport') || cat.includes('auto')) return 'badge-transport';
     if (cat.includes('utility') || cat.includes('bill')) return 'badge-utilities';
@@ -163,7 +220,7 @@ export default function Transactions() {
       <div className="view-header">
         <div className="view-title-container">
           <h1 className="view-title">Transaction Ledger</h1>
-          <p className="view-subtitle">Review, search, and update details of all expenditures.</p>
+          <p className="view-subtitle">Review, search, and manage all your expenditures and receipt scans.</p>
         </div>
         <button className="btn btn-primary" onClick={() => { resetForm(); setShowAddModal(true); }}>
           <Plus size={18} /> Add Record
@@ -171,21 +228,21 @@ export default function Transactions() {
       </div>
 
       {/* Filters Toolbar */}
-      <div className="card" style={{ padding: '16px', marginBottom: '24px', display: 'flex', flexWrap: 'wrap', gap: '16px', alignItems: 'center' }}>
-        <div style={{ position: 'relative', flexGrow: 1, minWidth: '200px' }}>
+      <div className="card" style={{ padding: '16px', marginBottom: '16px', display: 'flex', flexWrap: 'wrap', gap: '14px', alignItems: 'center' }}>
+        <div style={{ position: 'relative', flexGrow: 1, minWidth: '220px' }}>
           <Search size={16} style={{ position: 'absolute', left: '12px', top: '15px', color: 'var(--text-muted)' }} />
           <input 
             type="text" 
-            placeholder="Search description, merchant, notes..." 
+            placeholder="Search merchant, description, notes..." 
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             style={{ width: '100%', paddingLeft: '36px' }}
           />
         </div>
 
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <Filter size={16} style={{ color: 'var(--text-muted)' }} />
-          <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ padding: '10px 16px' }}>
+          <select value={category} onChange={(e) => handleCategoryChange(e.target.value)} style={{ padding: '10px 14px' }}>
             <option value="">All Categories</option>
             <option value="Food & Dining">Food & Dining</option>
             <option value="Transport & Auto">Transport & Auto</option>
@@ -199,20 +256,55 @@ export default function Transactions() {
           </select>
         </div>
 
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <ArrowUpDown size={16} style={{ color: 'var(--text-muted)' }} />
+          <select value={sortBy} onChange={(e) => handleSortChange(e.target.value)} style={{ padding: '10px 14px' }}>
+            <option value="dateDesc">Newest Date</option>
+            <option value="createdAt">Recently Added / Scanned</option>
+            <option value="dateAsc">Oldest Date</option>
+            <option value="amountDesc">Highest Amount</option>
+            <option value="amountAsc">Lowest Amount</option>
+          </select>
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <Calendar size={16} style={{ color: 'var(--text-muted)' }} />
           <input 
             type="month" 
             value={month}
-            onChange={(e) => setMonth(e.target.value)}
-            style={{ padding: '8px 16px' }}
+            onChange={(e) => handleMonthChange(e.target.value)}
+            style={{ padding: '8px 14px' }}
           />
-          {month && (
-            <button className="btn btn-secondary" onClick={() => setMonth('')} style={{ padding: '10px 12px' }}>
-              Clear Month
+          {month ? (
+            <button className="btn btn-secondary" onClick={() => handleMonthChange('')} style={{ padding: '8px 12px', fontSize: '13px' }}>
+              All Time
+            </button>
+          ) : (
+            <button className="btn btn-secondary" onClick={() => handleMonthChange(new Date().toISOString().slice(0, 7))} style={{ padding: '8px 12px', fontSize: '13px' }}>
+              Current Month
             </button>
           )}
         </div>
+      </div>
+
+      {/* Filter Status Pill Bar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', padding: '0 4px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+        <div>
+          Showing <strong>{transactions.length}</strong> {transactions.length === 1 ? 'transaction' : 'transactions'}
+          {month ? ` for ${new Date(month + '-15').toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}` : ' (All Time)'}
+          {search ? ` matching "${search}"` : ''}
+          {category ? ` in ${category}` : ''}
+          {sortBy === 'createdAt' ? ' · Sorted by Recently Logged' : ''}
+        </div>
+        {month && (
+          <button 
+            type="button"
+            onClick={() => handleMonthChange('')}
+            style={{ background: 'none', border: 'none', color: 'var(--color-primary)', cursor: 'pointer', fontSize: '12px', textDecoration: 'underline' }}
+          >
+            Show All Time (Clear Month Filter)
+          </button>
+        )}
       </div>
 
       {/* Ledger Table */}
@@ -234,14 +326,25 @@ export default function Transactions() {
               </thead>
               <tbody>
                 {transactions.map((tx) => (
-                  <tr key={tx._id}>
-                    <td>{new Date(tx.date).toLocaleDateString()}</td>
+                  <tr key={tx._id || tx.id}>
+                    <td>{new Date(tx.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</td>
                     <td>
                       <div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                           <strong>{tx.merchant || 'General Merchant'}</strong>
                           {tx.isAutoCategorized && (
                             <Sparkles size={11} color="var(--color-primary)" title="Auto-categorized by AI" />
+                          )}
+                          {tx.receiptUrl && (
+                            <a 
+                              href={tx.receiptUrl} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '11px', color: 'var(--color-primary)', textDecoration: 'none', marginLeft: '4px' }}
+                              title="View uploaded receipt image"
+                            >
+                              <Receipt size={12} /> Receipt
+                            </a>
                           )}
                         </div>
                         <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{tx.description}</div>
@@ -259,14 +362,14 @@ export default function Transactions() {
                     </td>
                     <td>{tx.paymentMethod}</td>
                     <td style={{ fontWeight: '600', color: 'var(--text-primary)' }}>
-                      -₹{tx.amount.toFixed(2)}
+                      -₹{Number(tx.amount).toFixed(2)}
                     </td>
                     <td style={{ textAlign: 'right' }}>
                       <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
                         <button className="btn btn-secondary" onClick={() => handleEditClick(tx)} style={{ padding: '6px 10px', borderRadius: 'var(--radius-sm)' }}>
                           <Edit2 size={13} />
                         </button>
-                        <button className="btn btn-danger" onClick={() => handleDeleteClick(tx._id)} style={{ padding: '6px 10px', borderRadius: 'var(--radius-sm)' }}>
+                        <button className="btn btn-danger" onClick={() => handleDeleteClick(tx._id || tx.id)} style={{ padding: '6px 10px', borderRadius: 'var(--radius-sm)' }}>
                           <Trash2 size={13} />
                         </button>
                       </div>
@@ -276,8 +379,13 @@ export default function Transactions() {
               </tbody>
             </table>
           ) : (
-            <div style={{ textAlign: 'center', padding: '50px', color: 'var(--text-secondary)' }}>
-              No transactions match the selected filters.
+            <div style={{ textAlign: 'center', padding: '50px 20px', color: 'var(--text-secondary)' }}>
+              <p style={{ marginBottom: '12px' }}>No transactions match the selected filters.</p>
+              {month && (
+                <button className="btn btn-secondary" onClick={() => handleMonthChange('')} style={{ fontSize: '13px' }}>
+                  Show All Time (Clear Month Filter)
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -296,9 +404,9 @@ export default function Transactions() {
                   type="text" 
                   name="description" 
                   value={form.description} 
-                  onChange={handleInputChange}
-                  placeholder="e.g. Starbucks Latte or Taxi ride"
-                  required
+                  onChange={handleInputChange} 
+                  placeholder="e.g. Starbucks Latte or Taxi ride" 
+                  required 
                 />
                 <span style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>
                   💡 Auto-categorization runs if category is left empty
@@ -312,20 +420,20 @@ export default function Transactions() {
                     type="text" 
                     name="merchant" 
                     value={form.merchant} 
-                    onChange={handleInputChange}
-                    placeholder="e.g. Starbucks"
+                    onChange={handleInputChange} 
+                    placeholder="e.g. Starbucks" 
                   />
                 </div>
                 <div className="form-group">
                   <label>Amount (₹) *</label>
                   <input 
                     type="number" 
-                    step="0.01"
+                    step="0.01" 
                     name="amount" 
                     value={form.amount} 
-                    onChange={handleInputChange}
-                    placeholder="0.00"
-                    required
+                    onChange={handleInputChange} 
+                    placeholder="0.00" 
+                    required 
                   />
                 </div>
               </div>
@@ -337,7 +445,7 @@ export default function Transactions() {
                     type="date" 
                     name="date" 
                     value={form.date} 
-                    onChange={handleInputChange}
+                    onChange={handleInputChange} 
                   />
                 </div>
                 <div className="form-group">
@@ -376,8 +484,8 @@ export default function Transactions() {
                   name="notes" 
                   value={form.notes} 
                   onChange={handleInputChange} 
-                  placeholder="Additional details..."
-                  rows="2"
+                  placeholder="Additional details..." 
+                  rows="2" 
                 />
               </div>
 
@@ -407,8 +515,8 @@ export default function Transactions() {
                   type="text" 
                   name="description" 
                   value={form.description} 
-                  onChange={handleInputChange}
-                  required
+                  onChange={handleInputChange} 
+                  required 
                 />
               </div>
 
@@ -419,18 +527,18 @@ export default function Transactions() {
                     type="text" 
                     name="merchant" 
                     value={form.merchant} 
-                    onChange={handleInputChange}
+                    onChange={handleInputChange} 
                   />
                 </div>
                 <div className="form-group">
                   <label>Amount (₹) *</label>
                   <input 
                     type="number" 
-                    step="0.01"
+                    step="0.01" 
                     name="amount" 
                     value={form.amount} 
-                    onChange={handleInputChange}
-                    required
+                    onChange={handleInputChange} 
+                    required 
                   />
                 </div>
               </div>
@@ -442,7 +550,7 @@ export default function Transactions() {
                     type="date" 
                     name="date" 
                     value={form.date} 
-                    onChange={handleInputChange}
+                    onChange={handleInputChange} 
                   />
                 </div>
                 <div className="form-group">
@@ -480,7 +588,7 @@ export default function Transactions() {
                   name="notes" 
                   value={form.notes} 
                   onChange={handleInputChange} 
-                  rows="2"
+                  rows="2" 
                 />
               </div>
 

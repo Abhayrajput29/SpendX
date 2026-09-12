@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { PiggyBank, Edit3, ShieldAlert, Sparkles, Check } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Edit3, ShieldAlert } from 'lucide-react';
 
 const FRONTEND_CATEGORIES = [
   'Food & Dining',
@@ -15,7 +15,6 @@ const FRONTEND_CATEGORIES = [
 
 export default function Budgets() {
   const [budgets, setBudgets] = useState([]);
-  const [spentData, setSpentData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
   
@@ -25,7 +24,7 @@ export default function Budgets() {
   const [limitValue, setLimitValue] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const fetchBudgetData = async () => {
+  const fetchBudgetData = useCallback(async () => {
     try {
       setLoading(true);
       // Fetch budget limits for this month
@@ -65,11 +64,11 @@ export default function Budgets() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [month]);
 
   useEffect(() => {
-    fetchBudgetData();
-  }, [month]);
+    void fetchBudgetData();
+  }, [fetchBudgetData]);
 
   const handleEditClick = (cat, currentLimit) => {
     setEditingCategory(cat);

@@ -1,4 +1,4 @@
-import { generateContentWithRetry, getTextModel, getJsonModel } from '../utils/geminiClient.js';
+import { generateContentWithCascade, generateContentWithRetry, getJsonModel } from '../utils/geminiClient.js';
 
 function escapeHtml(value) {
   return String(value)
@@ -144,7 +144,7 @@ function localCategorize(description) {
 // ---------------------------------------------------------------------------
 
 /**
- * Auto-categorize a transaction description via Gemini or local fallback.
+ * Auto-categorize a transaction description via Gemini cascade or local fallback.
  * @param {string} description
  * @returns {Promise<{ category: string, tags: string[], merchant: string }>}
  */
@@ -153,13 +153,19 @@ export async function autoCategorize(description) {
     return { category: 'Miscellaneous', tags: ['general'], merchant: '' };
   }
 
-  const geminiModelJson = getJsonModel();
+  // 1. Fast local rule match — instant response & quota conservation
+  const local = localCategorize(description);
+  if (local.category !== 'Miscellaneous') {
+    return local;
+  }
 
+  // 2. Try Gemini with JSON mode via cascade
+  const geminiModelJson = getJsonModel();
   if (geminiModelJson) {
     try {
       const prompt = `You are a financial AI. Categorize the transaction description: "${description}" into exactly one of these categories:\n${CATEGORIES.join(', ')}.\nExtract the merchant name and suggest 1-3 tags related to the transaction.\nReturn a valid JSON object matching this schema:\n{\n  "category": "exact category string from the list above",\n  "tags": ["tag1", "tag2"],\n  "merchant": "merchant name or empty string"\n}`;
 
-      const result = await generateContentWithRetry(geminiModelJson, prompt);
+      const result = await generateContentWithRetry(geminiModelJson, prompt, 1, 2000);
       const jsonText = result.response.text().trim();
       const parsed = JSON.parse(jsonText);
 
@@ -177,7 +183,7 @@ export async function autoCategorize(description) {
         merchant: parsed.merchant || extractLocalMerchant(description),
       };
     } catch (error) {
-      console.error('AI Service: Gemini categorization failed, using local fallback.', error);
+      console.warn('AI Service: Gemini categorization failed, using local fallback.', error?.status || error?.message);
       return localCategorize(description);
     }
   }
@@ -185,8 +191,119 @@ export async function autoCategorize(description) {
   return localCategorize(description);
 }
 
+// ---------------------------------------------------------------------------
+// Local advisor fallback — rich rule-based insights when Gemini is unavailable
+// ---------------------------------------------------------------------------
+
 /**
- * Generate financial advisor insights using Gemini or a local fallback.
+ * Build a rich HTML insights report from transaction/budget data locally.
+ * @param {{ totalSpent: number, categories: Object, txCount: number }} summary
+ * @param {Object} budgetSummary  { category: limit }
+ * @param {string|null} question
+ * @returns {string} HTML
+ */
+function buildLocalInsights(summary, budgetSummary, question) {
+  const sortedCats = Object.entries(summary.categories)
+    .sort(([, a], [, b]) => b - a);
+
+  const totalBudget = Object.values(budgetSummary).reduce((s, v) => s + v, 0);
+  const budgetPct = totalBudget > 0
+    ? Math.round((summary.totalSpent / totalBudget) * 100)
+    : null;
+
+  let html = '<h4>📊 Portfolio Insights (Local Analytics)</h4>';
+
+  // Summary row
+  html += '<ul>';
+  html += `<li><strong>Total Spending:</strong> ₹${summary.totalSpent.toFixed(2)} across <strong>${summary.txCount}</strong> transactions.</li>`;
+
+  if (budgetPct !== null) {
+    const budgetStatus = budgetPct >= 100
+      ? `<span>🔴 <strong>Budget exhausted</strong> — you have used ${budgetPct}% of your total limit (₹${totalBudget.toFixed(0)}).</span>`
+      : budgetPct >= 80
+      ? `<span>🟡 <strong>Approaching limit</strong> — ${budgetPct}% of your ₹${totalBudget.toFixed(0)} budget used.</span>`
+      : `<span>🟢 On track — ${budgetPct}% of your ₹${totalBudget.toFixed(0)} budget used.</span>`;
+    html += `<li>${budgetStatus}</li>`;
+  }
+
+  // Category breakdown
+  if (sortedCats.length > 0) {
+    html += '<li><strong>Spending Breakdown:</strong><ul>';
+    for (const [cat, amt] of sortedCats) {
+      const pct = Math.round((amt / (summary.totalSpent || 1)) * 100);
+      const limit = budgetSummary[cat];
+      let badge = '';
+      if (limit) {
+        const catPct = Math.round((amt / limit) * 100);
+        badge = catPct >= 100
+          ? ' — <span>🔴 Over budget</span>'
+          : catPct >= 80
+          ? ` — <span>🟡 ${catPct}% of limit</span>`
+          : ` — <span>🟢 ${catPct}% of limit</span>`;
+      }
+      html += `<li><strong>${cat}</strong>: ₹${amt.toFixed(2)} (${pct}%)${badge}</li>`;
+    }
+    html += '</ul></li>';
+  }
+
+  // Actionable tips
+  html += '<li><strong>Quick Tips:</strong><ul>';
+
+  // Biggest overspending category
+  const overBudget = sortedCats.filter(([cat, amt]) => budgetSummary[cat] && amt > budgetSummary[cat]);
+  if (overBudget.length > 0) {
+    const [topCat, topAmt] = overBudget[0];
+    const excess = topAmt - budgetSummary[topCat];
+    html += `<li>⚠️ Reduce <strong>${topCat}</strong> spending — you are ₹${excess.toFixed(2)} over your set limit.</li>`;
+  }
+
+  // Largest category suggestion
+  if (sortedCats.length > 0) {
+    const [topCat, topAmt] = sortedCats[0];
+    const pct = Math.round((topAmt / (summary.totalSpent || 1)) * 100);
+    if (pct > 40) {
+      html += `<li>💡 <strong>${topCat}</strong> makes up ${pct}% of your total spend. Consider setting a tighter budget limit here.</li>`;
+    }
+  }
+
+  // No budgets set
+  if (totalBudget === 0) {
+    html += '<li>📌 No budget limits set. Head to <strong>Budgets</strong> to configure monthly category limits and track overspending.</li>';
+  }
+
+  html += '<li>🔮 For AI-powered personalised advice, ask a question in the chat box below.</li>';
+  html += '</ul></li>';
+  html += '</ul>';
+
+  // Handle free-text question locally
+  if (question) {
+    const q = question.toLowerCase();
+    let answer = '';
+
+    if (q.includes('food') || q.includes('dining') || q.includes('restaurant')) {
+      const foodAmt = summary.categories['Food & Dining'] || 0;
+      answer = `Your Food & Dining spend is ₹${foodAmt.toFixed(2)}.${foodAmt > 3000 ? ' Consider meal prepping or cooking at home to cut costs.' : ' Keep it up!'}`;
+    } else if (q.includes('save') || q.includes('saving') || q.includes('reduce')) {
+      const topCats = sortedCats.slice(0, 2).map(([c, a]) => `<strong>${c}</strong> (₹${a.toFixed(2)})`);
+      answer = `Your top expense categories are ${topCats.join(' and ')}. Aim to reduce these by 10–15% each month.`;
+    } else if (q.includes('budget') || q.includes('limit')) {
+      answer = totalBudget > 0
+        ? `Your total budget is ₹${totalBudget.toFixed(2)} and you have spent ₹${summary.totalSpent.toFixed(2)} (${budgetPct}%).`
+        : 'You have not set any budget limits yet. Go to the Budgets section to set category limits.';
+    } else if (q.includes('total') || q.includes('spent') || q.includes('spend')) {
+      answer = `Your total spending is ₹${summary.totalSpent.toFixed(2)} across ${summary.txCount} transactions.`;
+    } else {
+      answer = `I can see your total spend is ₹${summary.totalSpent.toFixed(2)}. For personalised AI answers, please configure a GEMINI_API_KEY in the server environment.`;
+    }
+
+    html += `<div><p><strong>Q: ${escapeHtml(question)}</strong></p><p>${answer}</p></div>`;
+  }
+
+  return html;
+}
+
+/**
+ * Generate financial advisor insights using Gemini cascade or rich local fallback.
  * @param {Array} transactions
  * @param {Array} budgets
  * @param {string|null} question - optional user question
@@ -199,7 +316,7 @@ export async function getFinancialAdvisorInsights(transactions, budgets, questio
       acc.categories[t.category] = (acc.categories[t.category] || 0) + t.amount;
       return acc;
     },
-    { totalSpent: 0, categories: {} }
+    { totalSpent: 0, categories: {}, txCount: transactions.length }
   );
 
   const budgetSummary = budgets.reduce((acc, b) => {
@@ -207,56 +324,40 @@ export async function getFinancialAdvisorInsights(transactions, budgets, questio
     return acc;
   }, {});
 
-  const geminiModel = getTextModel();
-
-  // --- Local fallback ---
-  if (!geminiModel) {
-    let html = '<h4>Smart Portfolio Insights (Local Engine)</h4><ul>';
-    html += `<li><strong>Total Spending:</strong> You spent a total of <strong>₹${summary.totalSpent.toFixed(2)}</strong> this period.</li>`;
-
-    let maxCat = '';
-    let maxAmt = 0;
-    for (const [cat, amt] of Object.entries(summary.categories)) {
-      if (amt > maxAmt) {
-        maxAmt = amt;
-        maxCat = cat;
-      }
-      if (budgetSummary[cat] && amt > budgetSummary[cat]) {
-        html += `<li class="alert-item"><span class="warning-text">⚠️ Budget exceeded:</span> You spent <strong>₹${amt.toFixed(2)}</strong> on <strong>${cat}</strong>, exceeding your limit of ₹${budgetSummary[cat]}.</li>`;
-      }
-    }
-    if (maxCat) {
-      html += `<li><strong>Top Category:</strong> Your highest expenditure was in <strong>${maxCat}</strong> (₹${maxAmt.toFixed(2)}), representing <strong>${(
-        (maxAmt / (summary.totalSpent || 1)) *
-        100
-      ).toFixed(0)}%</strong> of your total budget.</li>`;
-    }
-    html += '<li><strong>Action Item:</strong> Set up category limits to keep tabs on incremental costs.</li>';
-    html += '</ul>';
-
-    if (question) {
-      html += `<div class="chat-response"><p><strong>Q: ${escapeHtml(question)}</strong></p><p><em>Notice: Full chat support requires a GEMINI_API_KEY.</em></p></div>`;
-    }
-    return html;
-  }
-
-  // --- Gemini ---
+  // --- Always try Gemini first via cascade (handles quota exhaustion automatically) ---
   try {
     const dataContext = {
       totalTransactions: transactions.length,
-      totalSpent: summary.totalSpent,
-      spendingByCategory: summary.categories,
+      totalSpent: parseFloat(summary.totalSpent.toFixed(2)),
+      spendingByCategory: Object.fromEntries(
+        Object.entries(summary.categories).map(([k, v]) => [k, parseFloat(v.toFixed(2))])
+      ),
       budgets: budgetSummary,
+      currency: 'INR (₹)',
     };
 
-    let prompt = question
-      ? `You are a professional AI Financial Advisor (FinanceAI). The user asks: "${question}".\nHere is their current spending summary for context:\n${JSON.stringify(dataContext, null, 2)}.\n\nNote: The user's transaction currency is Indian Rupees (INR). Refer to values using ₹ where appropriate.\nAnswer their question directly based on their spending, suggesting concrete actions. Use clean HTML format. Do not include markdown code block tags.`
-      : `You are a professional AI Financial Advisor (FinanceAI). Analyze the user's spending data:\n${JSON.stringify(dataContext, null, 2)}.\n\nNote: Currency is Indian Rupees (INR) — use ₹.\nProvide 3 concise, highly actionable savings insights in clean HTML (h4, p, ul, li, strong). Focus on overspending, budget progress, and smart recommendations. Do not include markdown code block tags.`;
+    const prompt = question
+      ? `You are FinanceAI, a professional financial advisor. The user asks: "${question}".\nSpending context:\n${JSON.stringify(dataContext, null, 2)}\n\nAnswer concisely and directly based on the data. Use ₹ for currency. Format as clean HTML using only: h4, p, ul, ol, li, strong, em. Do NOT use markdown or code blocks.`
+      : `You are FinanceAI, a professional financial advisor. Analyze the spending data below and provide exactly 3 actionable insights.\nData:\n${JSON.stringify(dataContext, null, 2)}\n\nUse ₹ for currency. Format as clean HTML using only: h4, p, ul, ol, li, strong, em. Do NOT use markdown or code blocks. Keep each insight concise (2-3 sentences).`;
 
-    const result = await generateContentWithRetry(geminiModel, prompt);
-    return result.response.text().trim();
+    const result = await generateContentWithCascade(prompt, 'text');
+    const text = result.response.text().trim();
+
+    // Strip accidental markdown code fences if Gemini wraps in ```html
+    const cleaned = text.replace(/^```html?\n?/i, '').replace(/\n?```$/i, '').trim();
+    return cleaned;
+
   } catch (error) {
-    console.error('AI Service: Gemini Advisor failed.', error);
-    return `<p>Failed to generate AI insights. Your total spending this month is ₹${summary.totalSpent.toFixed(2)}.</p>`;
+    const isQuota = error?.status === 429 || error?.message?.toLowerCase().includes('quota');
+    const isNoKey = error?.message?.includes('not initialized');
+    console.warn(
+      isQuota
+        ? 'AI Advisor: All Gemini models quota-exhausted — serving local insights.'
+        : isNoKey
+        ? 'AI Advisor: No API key — serving local insights.'
+        : `AI Advisor: Gemini failed (${error?.status || error?.message}) — serving local insights.`
+    );
+    // Always return a useful local response — never fail silently
+    return buildLocalInsights(summary, budgetSummary, question);
   }
 }

@@ -1,11 +1,16 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import { autoCategorize } from './aiService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbFilePath = path.join(__dirname, '../data/db.json');
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const defaultDbFilePath = path.join(__dirname, '../data/db.json');
+const dbFilePath = isServerless ? path.join(os.tmpdir(), 'spendx_db.json') : defaultDbFilePath;
+
+let memoryDbCache = null;
 
 /**
  * Dynamic Mock Data Generator for 12 months track record
@@ -273,43 +278,76 @@ export function generateYearlyMockData() {
  * Initialize local database file
  */
 function initDb() {
+  if (memoryDbCache) return;
+
   const dir = path.dirname(dbFilePath);
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      // Ignore directory creation error in serverless
+    }
   }
 
   if (!fs.existsSync(dbFilePath)) {
-    console.log('JSON DB Service: Creating local fallback database seed file with 12 months track record...');
-    const data = generateYearlyMockData();
-    fs.writeFileSync(dbFilePath, JSON.stringify(data, null, 2), 'utf-8');
-    console.log(`JSON DB Service: Successfully seeded ${data.transactions.length} transactions across 12 months.`);
+    // If in serverless and root seed db exists, copy it
+    if (isServerless && fs.existsSync(defaultDbFilePath)) {
+      try {
+        fs.copyFileSync(defaultDbFilePath, dbFilePath);
+        return;
+      } catch (e) {
+        console.warn('Notice: Could not copy seed db, generating in-memory:', e.message);
+      }
+    }
+
+    try {
+      const data = generateYearlyMockData();
+      fs.writeFileSync(dbFilePath, JSON.stringify(data, null, 2), 'utf-8');
+      memoryDbCache = data;
+    } catch (err) {
+      console.warn('Notice: Disk write unavailable, using in-memory cache:', err.message);
+      memoryDbCache = generateYearlyMockData();
+    }
   }
 }
 
 /**
  * Read raw data
  */
-function readRawData() {
+export function readRawData() {
+  if (memoryDbCache) return memoryDbCache;
   initDb();
   try {
-    const raw = fs.readFileSync(dbFilePath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (!parsed.subscriptions) parsed.subscriptions = [];
-    return parsed;
+    if (fs.existsSync(dbFilePath)) {
+      const raw = fs.readFileSync(dbFilePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!parsed.subscriptions) parsed.subscriptions = [];
+      memoryDbCache = parsed;
+      return parsed;
+    }
+    if (fs.existsSync(defaultDbFilePath)) {
+      const raw = fs.readFileSync(defaultDbFilePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!parsed.subscriptions) parsed.subscriptions = [];
+      memoryDbCache = parsed;
+      return parsed;
+    }
   } catch (error) {
-    console.error('JSON DB Service: Failed to read local db.json, returning empty structure.', error);
-    return { transactions: [], budgets: [], subscriptions: [] };
+    console.error('JSON DB Service: Failed to read local db.json, returning in-memory structure.', error.message);
   }
+  if (!memoryDbCache) memoryDbCache = generateYearlyMockData();
+  return memoryDbCache;
 }
 
 /**
  * Write raw data
  */
-function writeRawData(data) {
+export function writeRawData(data) {
+  memoryDbCache = data;
   try {
     fs.writeFileSync(dbFilePath, JSON.stringify(data, null, 2), 'utf-8');
   } catch (error) {
-    console.error('JSON DB Service: Failed to write to local db.json', error);
+    console.warn('JSON DB Service: Saved to in-memory cache (disk write unavailable):', error.message);
   }
 }
 
@@ -328,8 +366,8 @@ export const jsonDb = {
     }
   },
 
-  getTransactions: async (filters) => {
-    const { category, search, month } = filters;
+  getTransactions: async (filters = {}) => {
+    const { category, search, month, sortBy } = filters;
     const data = readRawData();
     let list = [...data.transactions];
 
@@ -350,12 +388,22 @@ export const jsonDb = {
       list = list.filter(t => t.date && t.date.slice(0, 7) === month);
     }
 
-    // Sort by date desc
+    if (sortBy === 'createdAt') {
+      return list.sort((a, b) => new Date(b.createdAt || b.date) - new Date(a.createdAt || a.date));
+    } else if (sortBy === 'dateAsc') {
+      return list.sort((a, b) => new Date(a.date) - new Date(b.date));
+    } else if (sortBy === 'amountDesc') {
+      return list.sort((a, b) => b.amount - a.amount);
+    } else if (sortBy === 'amountAsc') {
+      return list.sort((a, b) => a.amount - b.amount);
+    }
+
+    // Default sort by date desc
     return list.sort((a, b) => new Date(b.date) - new Date(a.date));
   },
 
   createTransaction: async (txData) => {
-    const { description, amount, date, paymentMethod, merchant, tags, notes, category } = txData;
+    const { description, amount, date, paymentMethod, merchant, tags, notes, category, receiptUrl } = txData;
     const data = readRawData();
 
     let finalCategory = category;
@@ -381,6 +429,7 @@ export const jsonDb = {
       paymentMethod: paymentMethod || 'Cash',
       category: finalCategory,
       merchant: finalMerchant,
+      receiptUrl: receiptUrl || '',
       tags: tags || [],
       notes: notes || '',
       isAutoCategorized: isAuto,
@@ -623,6 +672,61 @@ export const jsonDb = {
     return { success: true };
   },
 
+
+  getGoals: async () => {
+    const data = readRawData();
+    return data.goals || [];
+  },
+
+  createGoal: async (goalData) => {
+    const data = readRawData();
+    const newGoal = {
+      _id: 'mock-goal-' + (Date.now() + Math.random()),
+      currentAmount: 0,
+      isCompleted: false,
+      ...goalData,
+      targetAmount: parseFloat(goalData.targetAmount),
+      contributionAmount: parseFloat(goalData.contributionAmount || 0),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    if (!data.goals) data.goals = [];
+    data.goals.push(newGoal);
+    writeRawData(data);
+    return newGoal;
+  },
+
+  updateGoal: async (id, updates) => {
+    const data = readRawData();
+    if (!data.goals) data.goals = [];
+    const idx = data.goals.findIndex(g => g._id === id);
+    if (idx === -1) return null;
+    const original = data.goals[idx];
+    const updated = {
+      ...original,
+      ...updates,
+      targetAmount: updates.targetAmount !== undefined ? parseFloat(updates.targetAmount) : original.targetAmount,
+      currentAmount: updates.currentAmount !== undefined ? parseFloat(updates.currentAmount) : original.currentAmount,
+      contributionAmount: updates.contributionAmount !== undefined ? parseFloat(updates.contributionAmount) : original.contributionAmount,
+      updatedAt: new Date().toISOString()
+    };
+    if (updated.currentAmount >= updated.targetAmount) {
+      updated.isCompleted = true;
+    }
+    data.goals[idx] = updated;
+    writeRawData(data);
+    return updated;
+  },
+
+  deleteGoal: async (id) => {
+    const data = readRawData();
+    if (!data.goals) data.goals = [];
+    const idx = data.goals.findIndex(g => g._id === id);
+    if (idx === -1) return null;
+    data.goals.splice(idx, 1);
+    writeRawData(data);
+    return { success: true };
+  },
   bulkUpdateSubscriptions: async (subsList) => {
     const data = readRawData();
     data.subscriptions = subsList;

@@ -2,6 +2,7 @@
 node_modules/
 dist/
 client/dist/
+.vercel/
 
 # Environment files and secrets
 .env
