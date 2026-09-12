@@ -1,7 +1,6 @@
 {
   "version": 2,
-  "installCommand": "npm run install:all",
-  "buildCommand": "npm run build:client",
+  "buildCommand": "cd server && npm install && cd ../client && npm install && npm run build",
   "outputDirectory": "client/dist",
   "rewrites": [
     {
