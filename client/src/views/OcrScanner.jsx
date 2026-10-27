@@ -15,6 +15,7 @@ export default function OcrScanner() {
   const [fileError, setFileError] = useState('');
   const [scanEngine, setScanEngine] = useState('');
   const [parsedItems, setParsedItems] = useState([]);
+  const [imageQuality, setImageQuality] = useState(null);
   const [formError, setFormError] = useState('');
   const fileInputRef = useRef(null);
 
@@ -51,6 +52,7 @@ export default function OcrScanner() {
     });
     setParsedItems([]);
     setScanEngine('');
+    setImageQuality(null);
     setFormError('');
   };
 
@@ -134,6 +136,14 @@ export default function OcrScanner() {
       if (res.ok) {
         const data = await res.json();
         addLog('Temporary receipt image removed after analysis.');
+        if (data.quality) {
+          setImageQuality(data.quality);
+          const status = ['good', 'fair', 'poor'].includes(data.quality.status)
+            ? data.quality.status
+            : 'not assessed';
+          const confidence = Number.isFinite(data.quality.score) ? ` (${data.quality.score}% OCR confidence)` : '';
+          addLog(`Photo quality: ${status}${confidence}.`);
+        }
         if (data.warning) {
           setFileError(data.warning);
           addLog(data.warning);
@@ -380,6 +390,29 @@ export default function OcrScanner() {
                   ? 'The temporary image has been removed after analysis. Verify or adjust the extracted fields before confirming.'
                   : 'Select or drop a receipt image to analyze it temporarily. Extracted fields will appear here for you to verify.'}
             </p>
+
+            {imageQuality && (
+              <div
+                role="status"
+                style={{
+                  padding: '10px 14px',
+                  marginBottom: '16px',
+                  borderRadius: '6px',
+                  border: `1px solid ${imageQuality.status === 'poor' ? 'rgba(239, 68, 68, 0.3)' : imageQuality.status === 'fair' ? 'rgba(245, 158, 11, 0.3)' : 'var(--border-color)'}`,
+                  background: imageQuality.status === 'poor' ? 'rgba(239, 68, 68, 0.08)' : imageQuality.status === 'fair' ? 'rgba(245, 158, 11, 0.08)' : 'var(--bg-card-hover)',
+                  color: 'var(--text-secondary)',
+                  fontSize: '13px'
+                }}
+              >
+                <strong style={{ color: imageQuality.status === 'poor' ? '#f87171' : imageQuality.status === 'fair' ? '#fbbf24' : 'var(--text-primary)' }}>
+                  Photo quality: {['good', 'fair', 'poor'].includes(imageQuality.status) ? imageQuality.status : 'not assessed'}
+                  {Number.isFinite(imageQuality.score) ? ` · ${imageQuality.score}% OCR confidence` : ''}
+                </strong>
+                {Array.isArray(imageQuality.issues) && imageQuality.issues.length > 0 && (
+                  <span> — {imageQuality.issues.join(', ').replaceAll('-', ' ')} detected.</span>
+                )}
+              </div>
+            )}
 
             {formError && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 14px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.25)', borderRadius: '6px', color: '#f87171', marginBottom: '16px', fontSize: '13px' }}>

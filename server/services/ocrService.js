@@ -13,7 +13,44 @@ const TESSERACT_START_TIMEOUT_MS = 15_000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-const trainedDataPath = isServerless ? os.tmpdir() : path.join(__dirname, '..');
+const trainedDataPath = path.join(__dirname, '..');
+const languageCachePath = isServerless ? os.tmpdir() : trainedDataPath;
+const QUALITY_STATUSES = new Set(['good', 'fair', 'poor']);
+const QUALITY_ISSUES = new Set(['blur', 'low-resolution', 'dark', 'glare', 'cropped', 'low-ocr-confidence', 'unreadable-text']);
+
+export function assessReceiptImageQuality({ text = '', confidence = null, modelAssessment = null } = {}) {
+  const modelStatus = typeof modelAssessment?.status === 'string'
+    ? modelAssessment.status.toLowerCase()
+    : '';
+  const issues = Array.isArray(modelAssessment?.issues)
+    ? [...new Set(modelAssessment.issues.filter((issue) => QUALITY_ISSUES.has(issue)))]
+    : [];
+
+  if (QUALITY_STATUSES.has(modelStatus)) {
+    return { status: modelStatus, score: null, issues };
+  }
+
+  const score = Number.isFinite(confidence)
+    ? Math.max(0, Math.min(100, Math.round(confidence)))
+    : null;
+  if (!String(text).trim()) {
+    return { status: 'poor', score, issues: ['unreadable-text'] };
+  }
+  if (score === null) return { status: 'unknown', score: null, issues: [] };
+  if (score < 40) return { status: 'poor', score, issues: ['low-ocr-confidence'] };
+  if (score < 65) return { status: 'fair', score, issues: ['low-ocr-confidence'] };
+  return { status: 'good', score, issues: [] };
+}
+
+function getReceiptQualityWarning(quality) {
+  if (quality?.status === 'poor') {
+    return 'This receipt image was difficult to read. Retake it flat, in focus, well lit, and without glare; check that the whole receipt is visible. You can still review or enter the fields manually.';
+  }
+  if (quality?.status === 'fair') {
+    return 'Some receipt text may be unclear. Review the extracted details carefully; a sharper, evenly lit image may improve the scan.';
+  }
+  return undefined;
+}
 
 /**
  * Standard date formatting helper: converts any recognized date parts into YYYY-MM-DD
@@ -226,6 +263,7 @@ export async function scanReceiptWithVision(filePath) {
   const prompt = `You are an intelligent financial OCR assistant. Analyze this receipt image and extract structured transaction details.
 Allowed Categories: ${CATEGORIES.join(', ')}.
 Choose the category from the merchant's actual business or items, not a guess. Do not default unknown merchants to Food & Dining; use Miscellaneous when unclear. Ride-hailing, taxi, auto-rickshaw and bike-taxi services such as Rapido, Namma Yatri, BluSmart, Ola and Uber rides are Transport & Auto.
+Assess image legibility separately from receipt content. Mark quality poor when most text is unreadable due to blur, low resolution, darkness, glare, or cropping; fair when only some content is hard to read; otherwise good. Never invent receipt fields when text is illegible.
 
 Return valid JSON with:
 {
@@ -234,7 +272,8 @@ Return valid JSON with:
   "amount": 0.00,
   "category": "most appropriate category from allowed list",
   "items": ["Item name 1", "Item name 2"],
-  "rawSummary": "A concise 1-2 sentence transcription of key lines on the receipt"
+  "rawSummary": "A concise 1-2 sentence transcription of key lines on the receipt",
+  "imageQuality": { "status": "good, fair, or poor", "issues": [] }
 }`;
 
   const result = await visionModel.generateContent([
@@ -257,7 +296,8 @@ Return valid JSON with:
     category: CATEGORIES.includes(parsed.category) ? parsed.category : 'Miscellaneous',
     items: Array.isArray(parsed.items) ? parsed.items : [],
     rawText: parsed.rawSummary || `${parsed.merchant} - Total: ${parsed.amount}`,
-    engine: 'gemini-vision'
+    engine: 'gemini-vision',
+    qualityAssessment: parsed.imageQuality || null
   };
 }
 
@@ -269,6 +309,7 @@ export async function scanReceiptWithTesseract(filePath) {
 
   let worker = null;
   let ocrText = '';
+  let confidence = null;
   let startTimeoutId;
   let recognizeTimeoutId;
 
@@ -277,7 +318,7 @@ export async function scanReceiptWithTesseract(filePath) {
     const workerPromise = Tesseract.createWorker('eng', 1, {
       gzip: false,
       langPath: trainedDataPath,
-      cachePath: trainedDataPath,
+      cachePath: languageCachePath,
       errorHandler: (err) => {
         console.warn('OCR Service: Tesseract worker internal message:', err?.message || err);
       }
@@ -304,6 +345,12 @@ export async function scanReceiptWithTesseract(filePath) {
 
     const result = await Promise.race([recognizePromise, timeoutPromise]);
     ocrText = result?.data?.text || '';
+    const wordConfidences = (result?.data?.words || [])
+      .filter((word) => word.text?.trim() && Number.isFinite(word.confidence))
+      .map((word) => word.confidence);
+    confidence = wordConfidences.length
+      ? wordConfidences.reduce((total, value) => total + value, 0) / wordConfidences.length
+      : (Number.isFinite(result?.data?.confidence) ? result.data.confidence : null);
   } catch (error) {
     console.warn('OCR Service: Tesseract scanning encountered error:', error.message);
   } finally {
@@ -318,7 +365,7 @@ export async function scanReceiptWithTesseract(filePath) {
     }
   }
 
-  return ocrText;
+  return { text: ocrText, confidence };
 }
 
 /**
@@ -336,6 +383,13 @@ export async function scanReceipt(imageInput) {
       console.log('OCR Service: Attempting Gemini Vision parsing...');
       const visionResult = await scanReceiptWithVision(imageInput);
       console.log('OCR Service: Successfully parsed receipt with Gemini Vision.');
+      visionResult.quality = assessReceiptImageQuality({
+        text: visionResult.rawText,
+        modelAssessment: visionResult.qualityAssessment
+      });
+      delete visionResult.qualityAssessment;
+      const qualityWarning = getReceiptQualityWarning(visionResult.quality);
+      if (qualityWarning) visionResult.warning = qualityWarning;
 
       const ruleCategory = localCategorize(visionResult.merchant).category;
       if (ruleCategory !== 'Miscellaneous') {
@@ -350,9 +404,13 @@ export async function scanReceipt(imageInput) {
 
   // 2. Fallback to local Tesseract OCR
   let ocrText = '';
+  let ocrConfidence = null;
   if (fs.existsSync(imageInput)) {
-    ocrText = await scanReceiptWithTesseract(imageInput);
+    const ocrResult = await scanReceiptWithTesseract(imageInput);
+    ocrText = ocrResult.text;
+    ocrConfidence = ocrResult.confidence;
   }
+  const quality = assessReceiptImageQuality({ text: ocrText, confidence: ocrConfidence });
 
   // 3. Parse extracted text with Gemini Text Model or Regex
   let parsedData = null;
@@ -381,6 +439,8 @@ export async function scanReceipt(imageInput) {
     parsedData.category = ruleCategory;
   }
 
+  const qualityWarning = getReceiptQualityWarning(quality);
+
   return {
     merchant: parsedData.merchant || 'Receipt Store',
     date: parsedData.date || new Date().toISOString().split('T')[0],
@@ -389,6 +449,7 @@ export async function scanReceipt(imageInput) {
     items: parsedData.items || [],
     rawText: ocrText || 'Receipt processed',
     engine: parsedData.engine || 'fallback',
-    ...(!ocrText.trim() ? { warning: 'No readable text was detected. Try a sharper, brighter receipt image or enter the fields manually.' } : {})
+    quality,
+    ...(qualityWarning ? { warning: qualityWarning } : {})
   };
 }

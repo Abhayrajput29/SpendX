@@ -2,6 +2,11 @@
   "version": 2,
   "buildCommand": "npm ci --prefix server --include=dev && npm ci --prefix client --include=dev && npm run build --prefix client",
   "outputDirectory": "client/dist",
+  "functions": {
+    "api/index.js": {
+      "includeFiles": "server/eng.traineddata"
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",
