@@ -17,6 +17,12 @@ const PORT = process.env.PORT || 5001;
 const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const MONGODB_URI = process.env.MONGODB_URI || (isServerless ? '' : 'mongodb://127.0.0.1:27017/expense_tracker');
 const MONGODB_TIMEOUT_MS = Number.parseInt(process.env.MONGODB_TIMEOUT_MS || '5000', 10);
+const isLocalMongoUri = /^mongodb:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(MONGODB_URI);
+const requiresMongo = isServerless || (
+  Boolean(process.env.MONGODB_URI) &&
+  !isLocalMongoUri &&
+  process.env.SPENDX_JSON_FALLBACK !== 'true'
+);
 
 // Resolve paths for serving uploaded static files
 const __filename = fileURLToPath(import.meta.url);
@@ -112,7 +118,7 @@ export async function connectDB() {
       bufferCommands: false
     });
     await ensureModelIndexes();
-    console.log('=== MongoDB Connected Successfully ===');
+    console.log(`=== MongoDB Connected Successfully (host: ${mongoose.connection.host}, database: ${mongoose.connection.name}) ===`);
     return mongoose.connection;
   } catch (error) {
     console.warn('MongoDB Connection Warning:', error.message);
@@ -132,7 +138,7 @@ app.use(async (req, res, next) => {
     }
   }
   const isHealthCheck = req.path === '/health' || req.path === '/api/health';
-  if (isServerless && !isHealthCheck && mongoose.connection.readyState !== 1) {
+  if (requiresMongo && !isHealthCheck && mongoose.connection.readyState !== 1) {
     return res.status(503).json({ error: 'The database is temporarily unavailable.' });
   }
   next();
@@ -146,7 +152,7 @@ app.get(['/health', '/api/health'], (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     serverless: Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME),
-    mongodb: databaseConnected ? 'connected' : 'offline-fallback'
+    mongodb: databaseConnected ? 'connected' : requiresMongo ? 'unavailable' : 'offline-fallback'
   });
 });
 
@@ -204,6 +210,10 @@ async function initializeDatabase() {
   const conn = await connectDB();
 
   if (!conn) {
+    if (requiresMongo) {
+      console.error('Configured MongoDB is unavailable; JSON fallback is disabled to prevent data divergence.');
+      return;
+    }
     console.log('Using Offline JSON DB fallback. Ensure MongoDB is running or MONGODB_URI is set.');
     try {
       const result = await checkAndLogDueSubscriptions(true);

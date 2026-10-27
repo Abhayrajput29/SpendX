@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import Tesseract from 'tesseract.js';
-import { getGenAI, getJsonModel } from '../utils/geminiClient.js';
+import { generateContentWithCascade, getGenAI, getJsonModel } from '../utils/geminiClient.js';
 import { CATEGORIES, localCategorize } from './aiService.js';
 
 const RECEIPT_GEMINI_TIMEOUT_MS = 8_000;
@@ -26,20 +26,28 @@ export function assessReceiptImageQuality({ text = '', confidence = null, modelA
     ? [...new Set(modelAssessment.issues.filter((issue) => QUALITY_ISSUES.has(issue)))]
     : [];
 
-  if (QUALITY_STATUSES.has(modelStatus)) {
-    return { status: modelStatus, score: null, issues };
-  }
-
   const score = Number.isFinite(confidence)
     ? Math.max(0, Math.min(100, Math.round(confidence)))
     : null;
   if (!String(text).trim()) {
-    return { status: 'poor', score, issues: ['unreadable-text'] };
+    return { status: 'poor', score, issues: [...new Set([...issues, 'unreadable-text'])] };
   }
-  if (score === null) return { status: 'unknown', score: null, issues: [] };
-  if (score < 40) return { status: 'poor', score, issues: ['low-ocr-confidence'] };
-  if (score < 65) return { status: 'fair', score, issues: ['low-ocr-confidence'] };
-  return { status: 'good', score, issues: [] };
+
+  const physicalIssues = issues.some((issue) => ['blur', 'low-resolution', 'dark', 'glare', 'cropped'].includes(issue));
+  let status = QUALITY_STATUSES.has(modelStatus) ? modelStatus : 'unknown';
+  if (score !== null) {
+    if (score < 40) status = 'poor';
+    else if (score < 65 && status !== 'poor') status = 'fair';
+    else if (score >= 65 && !physicalIssues) status = 'good';
+    if (score < 65) issues.push('low-ocr-confidence');
+    else {
+      for (const issue of ['low-ocr-confidence', 'unreadable-text']) {
+        const index = issues.indexOf(issue);
+        if (index >= 0) issues.splice(index, 1);
+      }
+    }
+  }
+  return { status, score, issues: [...new Set(issues)] };
 }
 
 function getReceiptQualityWarning(quality) {
@@ -60,48 +68,60 @@ function normalizeDate(year, month, day) {
   const m = parseInt(month, 10);
   const d = parseInt(day, 10);
   if (isNaN(y) || isNaN(m) || isNaN(d)) return null;
-  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const parsed = new Date(Date.UTC(y, m - 1, d));
+  if (parsed.getUTCFullYear() !== y || parsed.getUTCMonth() !== m - 1 || parsed.getUTCDate() !== d) return null;
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function parseDateValue(value) {
+  const ymdMatch = value.match(/\b(20\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])\b/);
+  if (ymdMatch) return normalizeDate(ymdMatch[1], ymdMatch[2], ymdMatch[3]);
+
+  const dmyMatch = value.match(/\b(0?[1-9]|[12]\d|3[01])[-/.](0?[1-9]|1[0-2])[-/.](20\d{2})\b/);
+  if (dmyMatch) return normalizeDate(dmyMatch[3], dmyMatch[2], dmyMatch[1]);
+
+  const monthMap = {
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+  };
+  const namedMatch = value.match(/\b(0?[1-9]|[12]\d|3[01])?\s*([a-zA-Z]{3,9})[\s,]+(0?[1-9]|[12]\d|3[01])?,?\s*(20\d{2})\b/);
+  if (!namedMatch) return null;
+
+  const month = monthMap[namedMatch[2].toLowerCase().slice(0, 3)];
+  return month ? normalizeDate(namedMatch[4], month, namedMatch[1] || namedMatch[3] || '1') : null;
 }
 
 /**
  * Safe receipt date extraction
  */
 function extractReceiptDate(text) {
-  if (!text) return new Date().toISOString().split('T')[0];
+  if (!text) return null;
 
-  // 1. YYYY-MM-DD or YYYY/MM/DD
-  const ymdMatch = text.match(/\b(20\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])\b/);
-  if (ymdMatch) {
-    const d = normalizeDate(ymdMatch[1], ymdMatch[2], ymdMatch[3]);
-    if (d) return d;
-  }
+  const datePattern = /\b(?:20\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])|(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.]20\d{2}|(?:0?[1-9]|[12]\d|3[01])\s+[a-zA-Z]{3,9}\s*,?\s*20\d{2}|[a-zA-Z]{3,9}\s+(?:0?[1-9]|[12]\d|3[01])\s*,?\s*20\d{2})\b/gi;
+  const candidates = [];
+  for (const [lineIndex, line] of text.split('\n').entries()) {
+    const matches = [...line.matchAll(datePattern)];
+    for (const match of matches) {
+      const date = parseDateValue(match[0]);
+      if (!date) continue;
 
-  // 2. DD/MM/YYYY or DD-MM-YYYY
-  const dmyMatch = text.match(/\b(0?[1-9]|[12]\d|3[01])[-/.](0?[1-9]|1[0-2])[-/.](20\d{2})\b/);
-  if (dmyMatch) {
-    const d = normalizeDate(dmyMatch[3], dmyMatch[2], dmyMatch[1]);
-    if (d) return d;
-  }
-
-  // 3. Named month: e.g. "18 Jun 2026", "June 18, 2026"
-  const monthMap = {
-    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
-  };
-  const namedMatch = text.match(/\b(0?[1-9]|[12]\d|3[01])?\s*([a-zA-Z]{3,9})[\s,]+(0?[1-9]|[12]\d|3[01])?,?\s*(20\d{2})\b/);
-  if (namedMatch) {
-    const rawMonth = namedMatch[2].toLowerCase().slice(0, 3);
-    const monthNum = monthMap[rawMonth];
-    const day = namedMatch[1] || namedMatch[3] || '1';
-    const year = namedMatch[4];
-    if (monthNum && year) {
-      const d = normalizeDate(year, monthNum, day);
-      if (d) return d;
+      const prefix = line.slice(0, match.index).toLowerCase();
+      const label = prefix.match(/(?:receipt|transaction|purchase|invoice|bill|application)\s*date|date\s*of\s*(?:transaction|purchase|issue)/g);
+      let priority = 0;
+      if (label) {
+        const lastLabel = label[label.length - 1];
+        if (lastLabel.includes('transaction') || lastLabel.includes('purchase')) priority = 5;
+        else if (lastLabel.includes('receipt')) priority = 4;
+        else if (lastLabel.includes('invoice') || lastLabel.includes('bill')) priority = 3;
+        else priority = 2;
+      }
+      if (/\bdate\s+of\s+birth\b/i.test(prefix)) priority = -1;
+      candidates.push({ date, priority, lineIndex, position: match.index });
     }
   }
 
-  return new Date().toISOString().split('T')[0];
+  candidates.sort((a, b) => b.priority - a.priority || a.lineIndex - b.lineIndex || a.position - b.position);
+  return candidates[0]?.date || null;
 }
 
 /**
@@ -110,35 +130,40 @@ function extractReceiptDate(text) {
 function extractReceiptAmount(text) {
   if (!text) return 0.0;
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const amountPattern = /\d[\d,]*(?:\.\d{1,2})?/g;
+  const getAmounts = (line) => [...line.matchAll(amountPattern)]
+    .map((match) => Number(match[0].replace(/,/g, '')))
+    .filter((amount) => Number.isFinite(amount) && amount > 0 && amount < 1_000_000);
+  const totalLines = [];
+  const feeAmounts = [];
+  const allAmounts = [];
 
-  // High confidence: line with total/amount/paid keywords
-  const totalKeywords = ['total', 'amount', 'paid', 'due', 'grand total', 'subtotal', 'balance', 'charge'];
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    const lineLower = line.toLowerCase();
-    const hasKeyword = totalKeywords.some(kw => lineLower.includes(kw));
-    if (hasKeyword) {
-      // Find all currency/number matches in line
-      const match = line.match(/(?:[$€£₹Rs.]*|\b)\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\b/g);
-      if (match) {
-        for (let j = match.length - 1; j >= 0; j--) {
-          const cleanNum = parseFloat(match[j].replace(/[^0-9.]/g, ''));
-          if (!isNaN(cleanNum) && cleanNum > 0 && cleanNum < 1000000) {
-            return cleanNum;
-          }
-        }
-      }
+  for (const line of lines) {
+    const amounts = getAmounts(line);
+    if (!amounts.length || /\b20\d{2}\b/.test(line)) continue;
+    allAmounts.push(...amounts);
+
+    if (/\b(?:grand\s*total|total\s*amount|net\s*(?:amount|payable)|amount\s*(?:payable|due)|total\s*(?:payable|paid|due))\b/i.test(line)) {
+      totalLines.push({ priority: 3, amounts });
+    } else if (/\btotal\b/i.test(line) && !/\bsubtotal\b/i.test(line)) {
+      totalLines.push({ priority: 2, amounts });
+    } else if (/\b(?:paid|payable|balance\s*due|charge)\b/i.test(line) && !/\b(?:fee|tax)\b/i.test(line)) {
+      totalLines.push({ priority: 1, amounts });
+    }
+
+    if (/\b(?:fee|tax|surcharge|service\s*charge|convenience\s*charge)\b/i.test(line)) {
+      feeAmounts.push(...amounts);
     }
   }
 
-  // Fallback: search all positive numbers in the document, pick realistic max
-  const allNumbersRegex = /\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\b|\b\d+(?:\.\d{2})?\b/g;
-  const matches = text.match(allNumbersRegex) || [];
-  const numbers = matches
-    .map(m => parseFloat(m.replace(/,/g, '')))
-    .filter(n => !isNaN(n) && n > 0 && n < 1000000 && !/\b(20\d{2})\b/.test(String(n))); // skip years
+  if (totalLines.length) {
+    const highestPriority = Math.max(...totalLines.map(({ priority }) => priority));
+    const bestLine = totalLines.filter(({ priority }) => priority === highestPriority).at(-1);
+    return bestLine.amounts.at(-1);
+  }
 
-  return numbers.length > 0 ? Math.max(...numbers) : 0.0;
+  if (feeAmounts.length > 1) return feeAmounts.reduce((total, amount) => total + amount, 0);
+  return allAmounts.length ? Math.max(...allAmounts) : 0.0;
 }
 
 /**
@@ -147,9 +172,16 @@ function extractReceiptAmount(text) {
 function extractReceiptMerchant(text) {
   if (!text) return 'Receipt Store';
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const labeledMerchant = text.match(/(?:office\s*name|merchant|vendor|seller|store\s*name)\s*[:|]?\s*(.+?)(?=\s+(?:receipt\s*date|receipt\s*(?:no|number)|date\s+of\s+birth|bank\s*\/?\s*gateway|$)|[|;]|$)/im);
+  if (labeledMerchant) {
+    const merchant = labeledMerchant[1].replace(/^[\s:|]+|[\s:|]+$/g, '').trim();
+    if (merchant.length >= 2 && merchant.length <= 60) return merchant;
+  }
+
   const blacklist = [
     'welcome', 'receipt', 'invoice', 'tax invoice', 'bill', 'sale', 'cashier',
-    'terminal', 'store', 'customer', 'thank you', 'shipment', 'billing', 'date'
+    'terminal', 'store', 'customer', 'thank you', 'shipment', 'billing', 'date',
+    'government', 'application', 'transaction'
   ];
 
   for (let i = 0; i < Math.min(lines.length, 5); i++) {
@@ -174,7 +206,7 @@ function extractReceiptMerchant(text) {
  */
 export function parseReceiptWithRegex(ocrText) {
   const merchant = extractReceiptMerchant(ocrText);
-  const date = extractReceiptDate(ocrText);
+  const date = extractReceiptDate(ocrText) || new Date().toISOString().split('T')[0];
   const amount = extractReceiptAmount(ocrText);
 
   // Extract possible items (lines containing item description or price)
@@ -186,13 +218,16 @@ export function parseReceiptWithRegex(ocrText) {
       if (parts[1] && parts[1].length > 2) items.push(parts[1].trim());
     }
   }
+  const descriptionLine = lines.find((line) => /\b(?:transaction\s*(?:name|description)|service\s*(?:name|description)|purpose|particulars)\b/i.test(line));
+  const labeledDescription = descriptionLine?.replace(/^.*?\b(?:transaction\s*(?:name|description)|service\s*(?:name|description)|purpose|particulars)\b\s*[:|-]?\s*/i, '').trim();
 
   return {
     merchant,
     date,
     amount,
     category: 'Miscellaneous',
-    items
+    items,
+    description: items.slice(0, 2).join(', ') || (labeledDescription && labeledDescription.length > 2 ? labeledDescription : '')
   };
 }
 
@@ -200,14 +235,7 @@ export function parseReceiptWithRegex(ocrText) {
  * Parse receipt text using Gemini JSON model
  */
 export async function parseReceiptWithGemini(ocrText, timeoutMs = RECEIPT_TEXT_PARSE_TIMEOUT_MS) {
-  const genAI = getGenAI();
-  const geminiModel = genAI
-    ? genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite',
-      generationConfig: { responseMimeType: 'application/json' },
-    }, { timeout: timeoutMs })
-    : getJsonModel();
-  if (!geminiModel) throw new Error('Gemini API not initialized');
+  if (!getGenAI() || !getJsonModel()) throw new Error('Gemini API not initialized');
 
   const prompt = `You are an expert receipt parser. Given the following raw OCR text extracted from a receipt, parse it into structured JSON.
 OCR Text:
@@ -220,20 +248,24 @@ Choose the category based on the merchant's actual business or the items purchas
 Please extract:
 1. Merchant Name
 2. Transaction Date (formatted as YYYY-MM-DD)
-3. Total Amount (as a float/number)
+3. Final Total Amount (as a float/number), including every fee, tax, surcharge, or service charge and preferring the final total/payable amount over a subtotal or individual fee
 4. Category (strictly one of: Food & Dining, Transport & Auto, Utilities & Bills, Shopping, Entertainment, Healthcare & Fitness, Education, Travel, Miscellaneous)
-5. Individual Line Items (as an array of strings, if visible, else empty array)
+5. A concise transaction description based on the actual service or purchased items
+6. Individual Line Items (as an array of strings, if visible, else empty array)
+
+Use the date explicitly labeled receipt, transaction, purchase, or invoice date. Do not use a date of birth or other unrelated date. For government forms, identify the office named in the receipt's office/merchant field rather than the department heading. Do not invent values; use an empty string when a field is not visible.
 
 Return a valid JSON object matching this exact schema:
 {
   "merchant": "merchant name or empty string",
-  "date": "YYYY-MM-DD",
+  "date": "YYYY-MM-DD or empty string",
   "amount": 0.00,
   "category": "exact category string",
+  "description": "transaction purpose or purchased items",
   "items": ["item 1", "item 2"]
 }`;
 
-  const result = await geminiModel.generateContent(prompt);
+  const result = await generateContentWithCascade(prompt, 'json', timeoutMs, 0);
   const response = await result.response;
   return JSON.parse(response.text().trim());
 }
@@ -254,29 +286,25 @@ export async function scanReceiptWithVision(filePath) {
   const fileBuffer = fs.readFileSync(filePath);
   const base64Data = fileBuffer.toString('base64');
 
-  const modelName = process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite';
-  const visionModel = genAI.getGenerativeModel({
-    model: modelName,
-    generationConfig: { responseMimeType: 'application/json' }
-  }, { timeout: RECEIPT_GEMINI_TIMEOUT_MS });
-
   const prompt = `You are an intelligent financial OCR assistant. Analyze this receipt image and extract structured transaction details.
 Allowed Categories: ${CATEGORIES.join(', ')}.
 Choose the category from the merchant's actual business or items, not a guess. Do not default unknown merchants to Food & Dining; use Miscellaneous when unclear. Ride-hailing, taxi, auto-rickshaw and bike-taxi services such as Rapido, Namma Yatri, BluSmart, Ola and Uber rides are Transport & Auto.
 Assess image legibility separately from receipt content. Mark quality poor when most text is unreadable due to blur, low resolution, darkness, glare, or cropping; fair when only some content is hard to read; otherwise good. Never invent receipt fields when text is illegible.
+Use the receipt, transaction, purchase, or invoice date, not a date of birth. Choose the merchant/office named on the receipt rather than a generic department heading. The amount must be the final total paid/payable and must include fees, taxes, and surcharges; do not return a subtotal or one fee when a final total is printed. A vehicle licensing, RTO, or motor-vehicle service is Transport & Auto.
 
 Return valid JSON with:
 {
   "merchant": "merchant / store / service name",
-  "date": "YYYY-MM-DD (or current date if not visible)",
+  "date": "YYYY-MM-DD (or empty string if not visible)",
   "amount": 0.00,
   "category": "most appropriate category from allowed list",
+  "description": "short transaction purpose based on the receipt",
   "items": ["Item name 1", "Item name 2"],
   "rawSummary": "A concise 1-2 sentence transcription of key lines on the receipt",
   "imageQuality": { "status": "good, fair, or poor", "issues": [] }
 }`;
 
-  const result = await visionModel.generateContent([
+  const result = await generateContentWithCascade([
     prompt,
     {
       inlineData: {
@@ -284,16 +312,17 @@ Return valid JSON with:
         mimeType: mimeType
       }
     }
-  ]);
+  ], 'json', RECEIPT_GEMINI_TIMEOUT_MS, 0);
 
   const response = await result.response;
   const parsed = JSON.parse(response.text().trim());
 
   return {
     merchant: parsed.merchant || 'Receipt Store',
-    date: parsed.date || new Date().toISOString().split('T')[0],
+    date: parsed.date || '',
     amount: typeof parsed.amount === 'number' ? parsed.amount : parseFloat(parsed.amount) || 0.0,
     category: CATEGORIES.includes(parsed.category) ? parsed.category : 'Miscellaneous',
+    description: typeof parsed.description === 'string' ? parsed.description.trim() : '',
     items: Array.isArray(parsed.items) ? parsed.items : [],
     rawText: parsed.rawSummary || `${parsed.merchant} - Total: ${parsed.amount}`,
     engine: 'gemini-vision',
@@ -375,42 +404,56 @@ export async function scanReceiptWithTesseract(filePath) {
  * 3. Parses text with Gemini text parser or regex fallback
  */
 export async function scanReceipt(imageInput) {
-  console.log(`OCR Service: Processing receipt image: ${imageInput}`);
+  if (!fs.existsSync(imageInput)) throw new Error('Receipt image is missing from temporary storage.');
+  console.log('OCR Service: Processing temporary receipt image.');
 
-  // 1. Try Gemini Multimodal Vision first if API key is present
-  if (process.env.GEMINI_API_KEY && fs.existsSync(imageInput)) {
+  const ocrPromise = scanReceiptWithTesseract(imageInput);
+  let visionResult = null;
+  if (process.env.GEMINI_API_KEY) {
     try {
       console.log('OCR Service: Attempting Gemini Vision parsing...');
-      const visionResult = await scanReceiptWithVision(imageInput);
+      visionResult = await scanReceiptWithVision(imageInput);
       console.log('OCR Service: Successfully parsed receipt with Gemini Vision.');
-      visionResult.quality = assessReceiptImageQuality({
-        text: visionResult.rawText,
-        modelAssessment: visionResult.qualityAssessment
-      });
-      delete visionResult.qualityAssessment;
-      const qualityWarning = getReceiptQualityWarning(visionResult.quality);
-      if (qualityWarning) visionResult.warning = qualityWarning;
-
-      const ruleCategory = localCategorize(visionResult.merchant).category;
-      if (ruleCategory !== 'Miscellaneous') {
-        visionResult.category = ruleCategory;
-      }
-
-      return visionResult;
     } catch (visionError) {
       console.warn('OCR Service: Gemini Vision failed, falling back to local OCR:', visionError.message);
     }
   }
 
-  // 2. Fallback to local Tesseract OCR
-  let ocrText = '';
-  let ocrConfidence = null;
-  if (fs.existsSync(imageInput)) {
-    const ocrResult = await scanReceiptWithTesseract(imageInput);
-    ocrText = ocrResult.text;
-    ocrConfidence = ocrResult.confidence;
+  const { text: ocrText, confidence: ocrConfidence } = await ocrPromise;
+  const regexData = parseReceiptWithRegex(ocrText);
+  const receiptDate = extractReceiptDate(ocrText);
+  const ocrMerchant = regexData.merchant !== 'Receipt Store' ? regexData.merchant : '';
+  const merchant = ocrMerchant || visionResult?.merchant || 'Receipt Store';
+  const amount = regexData.amount > 0 ? regexData.amount : (visionResult?.amount || 0);
+  const date = receiptDate || visionResult?.date || new Date().toISOString().split('T')[0];
+  const items = visionResult?.items?.length ? visionResult.items : regexData.items;
+  const description = visionResult?.description || regexData.description || '';
+  const ruleCategory = localCategorize(`${merchant}\n${items.join('\n')}\n${ocrText}`).category;
+  const category = ruleCategory !== 'Miscellaneous'
+    ? ruleCategory
+    : visionResult?.category || 'Miscellaneous';
+  const quality = assessReceiptImageQuality({
+    text: ocrText || visionResult?.rawText || '',
+    confidence: ocrConfidence,
+    modelAssessment: visionResult?.qualityAssessment
+  });
+  const qualityWarning = getReceiptQualityWarning(quality);
+
+  if (visionResult) {
+    return {
+      ...visionResult,
+      merchant,
+      date,
+      amount,
+      category,
+      description,
+      items,
+      rawText: ocrText || visionResult.rawText,
+      engine: 'gemini-vision+tesseract',
+      quality,
+      ...(qualityWarning ? { warning: qualityWarning } : {})
+    };
   }
-  const quality = assessReceiptImageQuality({ text: ocrText, confidence: ocrConfidence });
 
   // 3. Parse extracted text with Gemini Text Model or Regex
   let parsedData = null;
@@ -428,18 +471,16 @@ export async function scanReceipt(imageInput) {
 
   if (!parsedData) {
     console.log('OCR Service: Parsing OCR text with Regex fallback...');
-    parsedData = parseReceiptWithRegex(ocrText);
+    parsedData = regexData;
     parsedData.engine = 'tesseract-regex';
   }
 
-  if (!CATEGORIES.includes(parsedData.category)) parsedData.category = 'Miscellaneous';
-  const merchantDescription = parsedData.merchant || ocrText.slice(0, 100);
-  const ruleCategory = localCategorize(merchantDescription).category;
-  if (ruleCategory !== 'Miscellaneous') {
-    parsedData.category = ruleCategory;
-  }
-
-  const qualityWarning = getReceiptQualityWarning(quality);
+  if (ocrMerchant) parsedData.merchant = ocrMerchant;
+  if (receiptDate) parsedData.date = receiptDate;
+  if (regexData.amount > 0) parsedData.amount = regexData.amount;
+  if (regexData.description) parsedData.description = regexData.description;
+  parsedData.category = CATEGORIES.includes(parsedData.category) ? parsedData.category : 'Miscellaneous';
+  if (ruleCategory !== 'Miscellaneous') parsedData.category = ruleCategory;
 
   return {
     merchant: parsedData.merchant || 'Receipt Store',
@@ -447,6 +488,7 @@ export async function scanReceipt(imageInput) {
     amount: typeof parsedData.amount === 'number' ? parsedData.amount : parseFloat(parsedData.amount) || 0.0,
     category: parsedData.category || 'Miscellaneous',
     items: parsedData.items || [],
+    description: parsedData.description || '',
     rawText: ocrText || 'Receipt processed',
     engine: parsedData.engine || 'fallback',
     quality,

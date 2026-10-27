@@ -4,6 +4,51 @@ import { UploadCloud, CheckCircle, Loader2, Sparkles, Tag, AlertCircle, ArrowRig
 import { EXPENSE_CATEGORIES } from '../utils/categories';
 import { useAuth } from '../context/AuthContext';
 
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 2560;
+
+async function prepareReceiptUpload(file) {
+  const isAvif = file.type === 'image/avif' || /\.avif$/i.test(file.name);
+  if (file.size <= MAX_UPLOAD_BYTES && !isAvif) return file;
+
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+    let scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height));
+    while (scale >= 0.4) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Image processing is unavailable in this browser.');
+
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+      for (const quality of [0.92, 0.86, 0.8, 0.74]) {
+        const blob = await new Promise((resolve, reject) => {
+          canvas.toBlob((result) => {
+            if (result) resolve(result);
+            else reject(new Error('The image could not be optimized for upload.'));
+          }, 'image/jpeg', quality);
+        });
+        if (blob.size <= MAX_UPLOAD_BYTES) {
+          const name = file.name.replace(/\.[^.]+$/, '') || 'receipt';
+          return new File([blob], `${name}.jpg`, { type: 'image/jpeg', lastModified: file.lastModified });
+        }
+      }
+      scale *= 0.8;
+    }
+    throw new Error('Receipt image is too large to safely upload. Choose a smaller image.');
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Receipt image')) throw error;
+    throw new Error('Receipt image could not be prepared for upload. Try a JPG or PNG image.');
+  } finally {
+    bitmap?.close();
+  }
+}
+
 export default function OcrScanner() {
   const { requireAuth } = useAuth();
   const [selectedFile, setSelectedFile] = useState(null);
@@ -114,9 +159,13 @@ export default function OcrScanner() {
       setFormError('');
 
       addLog('Uploading receipt image to backend...');
-      
+      const uploadFile = await prepareReceiptUpload(fileToScan);
+      if (uploadFile !== fileToScan) {
+        addLog(`Optimized image for serverless upload (${(uploadFile.size / 1024).toFixed(1)} KB).`);
+      }
+
       const formData = new FormData();
-      formData.append('receipt', fileToScan);
+      formData.append('receipt', uploadFile);
 
       addLog('Extracting merchant, items, amount, date, and category...');
       const controller = new AbortController();
@@ -148,7 +197,9 @@ export default function OcrScanner() {
           setFileError(data.warning);
           addLog(data.warning);
         }
-        const engineLabel = data.engine === 'gemini-vision' ? 'Gemini AI Vision' : 'Tesseract OCR + Neural Parser';
+        const engineLabel = data.engine?.startsWith('gemini-vision')
+          ? 'Gemini AI Vision + Tesseract OCR'
+          : 'Tesseract OCR + Neural Parser';
         setScanEngine(engineLabel);
         addLog(`Receipt processed successfully with ${engineLabel}!`);
 
@@ -156,7 +207,7 @@ export default function OcrScanner() {
         setParsedItems(itemsList);
 
         setForm({
-          description: `Receipt from ${data.merchant || 'Store'}`,
+          description: data.description || `Receipt from ${data.merchant || 'Store'}`,
           amount: data.amount > 0 ? data.amount : '',
           category: data.category || 'Miscellaneous',
           paymentMethod: 'Cash',
@@ -176,6 +227,9 @@ export default function OcrScanner() {
       if (err.name === 'AbortError') {
         addLog('Scanning stopped after 45 seconds.');
         setFileError('Receipt scanning took too long. Try a smaller, sharper image or check that the backend is responsive.');
+      } else if (err.message?.startsWith('Receipt image')) {
+        addLog(`Image preparation failed: ${err.message}`);
+        setFileError(err.message);
       } else {
         addLog('Scanning aborted: Server connection error.');
         setFileError('Unable to connect to server. Please ensure the backend is running.');

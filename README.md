@@ -83,6 +83,7 @@ MONGODB_URI=mongodb://127.0.0.1:27017/expense_tracker
 
 # Optional: enables Gemini-powered features
 GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.5-flash-lite
 
 # Optional: defaults to 5001
 PORT=5001
@@ -161,6 +162,7 @@ Run these commands from the project root:
 | `npm run build` | Install server/client dependencies and build the frontend |
 | `npm run build:client` | Alias for the root build command |
 | `npm run start` | Build the frontend, then start the backend in production mode |
+| `npm test --prefix server` | Run backend unit tests, including receipt OCR parsing |
 
 Run these commands from `client`:
 
@@ -209,7 +211,7 @@ Confirm that the backend is running and visit http://localhost:5001/health. If t
 
 ### MongoDB connection errors
 
-Start local MongoDB, or check `MONGODB_URI`, the Atlas IP allowlist, and database credentials. The application can run in JSON fallback mode, but data will be local to that checkout.
+Start local MongoDB, or check `MONGODB_URI`, the Atlas IP allowlist, and database credentials. When a remote `MONGODB_URI` is configured, the API now fails closed instead of silently showing data from a different local JSON database. Set `SPENDX_JSON_FALLBACK=true` only when intentionally working offline; those records will not appear in MongoDB or Vercel.
 
 ### AI features are unavailable
 
@@ -220,7 +222,7 @@ Stop the process using the port. The backend port can be changed with `PORT` in 
 
 ### OCR scanning fails
 
-Use a clear image smaller than 10 MB. Ensure the backend is running and that `server/eng.traineddata` is present.
+Use a clear image no larger than 10 MB. Ensure the backend is running and that `server/eng.traineddata` is present. The Vercel function includes the Tesseract worker/core assets and allows up to 60 seconds for OCR processing.
 
 ## Deployment to Vercel
 
@@ -239,12 +241,22 @@ In Project Settings → Environment Variables, add:
 
 - `MONGODB_URI`: Your MongoDB Atlas URI (`mongodb+srv://...`)
 - `GEMINI_API_KEY`: Google Gemini API key
-- `GEMINI_MODEL`: `gemini-1.5-flash`
+- `GEMINI_MODEL`: `gemini-3.5-flash-lite`
 - `AUTH_SECRET`: Random 32+ character JWT secret string
 - `APP_PASSWORD`: Optional shared password for the single local fallback account; use registered accounts for separate users
 - `NODE_ENV`: `production`
 
 > **Note**: In MongoDB Atlas Network Access, ensure IP `0.0.0.0/0` (Allow Access from Anywhere) is enabled so Vercel's dynamic serverless functions can connect.
+
+### Keeping localhost and Vercel data in sync
+
+The app scopes records to the authenticated MongoDB user ID, not just the username. To see the same account data in both environments, configure the local `server/.env` and Vercel Production with the same `MONGODB_URI` (including its database name) and the same `AUTH_SECRET`. A username created in two different databases represents two different accounts and will have different transactions. Do not rely on the local JSON fallback for cross-environment data: it is specific to that machine, and Vercel returns an error instead of silently using ephemeral JSON storage when MongoDB is unavailable.
+
+By default, the frontend calls `/api` on its own origin: localhost uses its local backend proxy, and Vercel uses the deployed serverless API. Leave `VITE_API_BASE_URL` unset unless the frontend is intentionally meant to use a separate API deployment. Confirm that `http://localhost:5001/health` reports `"mongodb":"connected"` before comparing local data with production.
+
+The backend logs the connected MongoDB host and database name (never the connection string) so these can be compared between local startup logs and Vercel function logs.
+
+Receipt images remain limited to 10 MB at selection. Images above the serverless request payload threshold, and AVIF images, are converted in the browser to a temporary JPEG upload; the original preview and transaction fields remain unchanged.
 
 ### 4. Deploy
 Click **Deploy**. Vercel will build the frontend and serve both the static Vite app and the `/api` serverless backend on the same domain.

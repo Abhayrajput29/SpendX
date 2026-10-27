@@ -4,7 +4,12 @@
   "outputDirectory": "client/dist",
   "functions": {
     "api/index.js": {
-      "includeFiles": "server/eng.traineddata"
+      "maxDuration": 60,
+      "includeFiles": [
+        "server/eng.traineddata",
+        "server/node_modules/tesseract.js/**/*",
+        "server/node_modules/tesseract.js-core/**/*"
+      ]
     }
   },
   "headers": [

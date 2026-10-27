@@ -4,14 +4,15 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // ---------------------------------------------------------------------------
-// Model cascade — tries progressively smaller/cheaper models on quota errors
+// Model cascade — uses current stable models and tolerates retired configured IDs
 // ---------------------------------------------------------------------------
 
-const MODEL_CASCADE = [
-  process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-8b',
-];
+const MODEL_CASCADE = [...new Set([
+  process.env.GEMINI_MODEL,
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-3.6-flash',
+].filter(Boolean))];
 export const GEMINI_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
@@ -114,8 +115,12 @@ if (geminiApiKey) {
  * @param {string} modelName
  * @param {'text'|'json'} type
  */
-function getModel(modelName, type) {
+function getModel(modelName, type, timeoutMs = GEMINI_REQUEST_TIMEOUT_MS) {
   if (!_genAI) return null;
+  if (timeoutMs !== GEMINI_REQUEST_TIMEOUT_MS) {
+    const config = type === 'json' ? { generationConfig: { responseMimeType: 'application/json' } } : {};
+    return _genAI.getGenerativeModel({ model: modelName, ...config }, { timeout: timeoutMs });
+  }
   if (!_modelCache[modelName]) {
     _modelCache[modelName] = {
       text: _genAI.getGenerativeModel({ model: modelName }, { timeout: GEMINI_REQUEST_TIMEOUT_MS }),
@@ -145,29 +150,33 @@ export function getJsonModel() {
 
 /**
  * Attempt generateContent across the full model cascade.
- * Tries each model in MODEL_CASCADE; on 429 quota errors moves to the next.
+ * Tries the next model on quota exhaustion or when a configured model is retired.
  * On 503 (overloaded) retries the same model with backoff first.
  *
  * @param {string|object} prompt
  * @param {'text'|'json'} type - 'text' (default) or 'json'
+ * @param {number} timeoutMs - per-model request timeout
+ * @param {number} retries - retries for transient quota/overload responses
  * @returns {Promise<import("@google/generative-ai").GenerateContentResult>}
  */
-export async function generateContentWithCascade(prompt, type = 'text') {
+export async function generateContentWithCascade(prompt, type = 'text', timeoutMs = GEMINI_REQUEST_TIMEOUT_MS, retries = 2) {
   if (!_genAI) throw new Error('Gemini API not initialized — no GEMINI_API_KEY set.');
 
   let lastError;
   for (const modelName of MODEL_CASCADE) {
-    const model = getModel(modelName, type);
+    const model = getModel(modelName, type, timeoutMs);
     try {
-      return await generateContentWithRetry(model, prompt, 2, 3000);
+      return await generateContentWithRetry(model, prompt, retries, 3000);
     } catch (error) {
       const status = error.status || 0;
       const msg = error.message || '';
       const isQuotaExhausted =
         status === 429 || msg.includes('429') || msg.toLowerCase().includes('quota');
+      const isModelUnavailable = (status === 404 || status === 410) &&
+        /model|not found|no longer available/i.test(msg);
 
-      if (isQuotaExhausted && MODEL_CASCADE.indexOf(modelName) < MODEL_CASCADE.length - 1) {
-        console.warn(`Gemini: Quota exhausted on ${modelName}, trying next model in cascade...`);
+      if ((isQuotaExhausted || isModelUnavailable) && MODEL_CASCADE.indexOf(modelName) < MODEL_CASCADE.length - 1) {
+        console.warn(`Gemini: ${isModelUnavailable ? 'Model unavailable' : 'Quota exhausted'} on ${modelName}, trying next model in cascade...`);
         lastError = error;
         continue;
       }
