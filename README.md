@@ -24,7 +24,7 @@ Finance AI Expense Tracker is a full-stack personal-finance dashboard for record
 
 Install these before starting:
 
-- Node.js 20 or newer, with npm. Use a currently supported Node.js LTS release; Node 20 is no longer in support.
+- Node.js 22.12 or newer, with npm. Use a currently supported Node.js LTS release.
 - Git
 - MongoDB 7 or newer, either running locally or a MongoDB Atlas connection string (optional; the app falls back to a local JSON database)
 - A Gemini API key if you want AI features. The application still runs with local fallback logic without one.
@@ -116,53 +116,37 @@ For MongoDB Atlas, replace `MONGODB_URI` with your Atlas connection string. Make
 
 If MongoDB cannot be reached, the server logs the connection error and uses the local JSON database service instead. This is convenient for a quick demo, but MongoDB is recommended for persistent multi-user or production use.
 
-## Run the Application
+## Run the Application (Local Hosting)
 
-From the project root:
+### Quick Start
+
+From the project root directory, run:
 
 ```bash
 npm run dev
 ```
 
-This starts both processes:
+This concurrently launches both the backend and frontend development servers:
 
-- Frontend: http://localhost:5173
-- Backend: http://localhost:5001
-- Backend health check: http://localhost:5001/health
+- **Frontend (Vite)**: [http://localhost:5173](http://localhost:5173) or [http://127.0.0.1:5173](http://127.0.0.1:5173)
+- **Backend (Express)**: [http://localhost:5001](http://localhost:5001)
+- **Backend Health Check**: [http://localhost:5001/health](http://localhost:5001/health)
 
-Open the frontend URL in your browser. The Vite development server proxies `/api` requests to the backend, so the browser does not need a separate API URL configuration.
+Open the frontend URL in your browser. The Vite development server automatically proxies all `/api` and `/uploads` requests to the backend server at `http://127.0.0.1:5001`.
 
-Sign in with a registered account or create one from the sign-in screen. The configured `APP_PASSWORD` is only for the single shared local fallback account. API requests use a signed bearer token, and uploaded receipts are served only through authenticated API requests.
+### Running in Separate Terminals
 
-You can also run each process separately in two terminals:
+If you prefer to run and view logs for each service independently, open two terminals:
 
 ```bash
-# Terminal 1
+# Terminal 1: Backend Express Server
 npm run server
 
-# Terminal 2
+# Terminal 2: Frontend Vite Client
 npm run client
 ```
 
-Stop either process with `Ctrl+C`.
-
-## First Run Behavior
-
-New workspaces start empty. The application does not generate or insert sample transactions, budgets, or subscriptions.
-
-When MongoDB is unavailable, the server uses its local JSON data service. Local database data and uploaded receipts are intentionally ignored by Git, so each developer has an independent local data set. The root `.gitignore` also excludes environment files (except the tracked `server/.env.example` template), dependency folders, build output, logs, and common editor/OS files.
-
-## Using the App
-
-1. Open the Dashboard to review monthly totals and category spending.
-2. Use Transactions to add, search, filter, edit, or delete expenses.
-3. Set category limits in Budgets and compare actual spending with planned spending.
-4. Open Forecast to review projected spending and apply recommendations where available.
-5. Use Subscriptions to detect repeated payments and manage recurring expenses.
-6. Use OCR Scanner to upload a receipt and review the extracted transaction before saving it.
-7. Use AI Advisor for monthly analysis and interactive questions when `GEMINI_API_KEY` is configured.
-
-Receipt uploads are limited to 10 MB. The upload filter accepts image MIME types and common JPG, PNG, WebP, AVIF, and HEIC file extensions; OCR support and results vary by format and image quality.
+Stop either process at any time by pressing `Ctrl + C`.
 
 ## Available Scripts
 
@@ -232,8 +216,7 @@ Start local MongoDB, or check `MONGODB_URI`, the Atlas IP allowlist, and databas
 Check that `server/.env` contains a valid `GEMINI_API_KEY`, then restart the backend. Environment changes are read when the server starts.
 
 ### Port 5001 or 5173 is already in use
-
-Stop the process using the port. The backend port can be changed with `PORT` in `server/.env`, but the Vite proxy target in `client/vite.config.js` must be changed to the same port.
+Stop the process using the port. The backend port can be changed with `PORT` in `server/.env`; if you do, update both backend proxy targets in `client/vite.config.js` to the same port and restart the frontend.
 
 ### OCR scanning fails
 

@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { UploadCloud, CheckCircle, Loader2, Sparkles, Tag, AlertCircle, ArrowRight } from 'lucide-react';
 import { EXPENSE_CATEGORIES } from '../utils/categories';
+import { useAuth } from '../context/AuthContext';
 
 export default function OcrScanner() {
+  const { requireAuth } = useAuth();
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [scanning, setScanning] = useState(false);
@@ -56,9 +58,9 @@ export default function OcrScanner() {
 
   const selectFile = (file) => {
     const supportedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/avif'];
-    const hasSupportedExt = /\.(jpe?g|png|webp|avif|heic)$/i.test(file.name);
+    const hasSupportedExt = /\.(jpe?g|png|webp|avif)$/i.test(file.name);
     
-    if (!supportedTypes.includes(file.type) && !hasSupportedExt && !file.type.startsWith('image/')) {
+    if (!supportedTypes.includes(file.type) && !hasSupportedExt) {
       setFileError('Please upload a valid receipt image (JPG, PNG, WebP, or AVIF).');
       return;
     }
@@ -89,11 +91,15 @@ export default function OcrScanner() {
   const handleDrop = (e) => {
     e.preventDefault();
     const [file] = e.dataTransfer.files;
-    if (file) selectFile(file);
+    if (file) {
+      requireAuth(() => selectFile(file), 'Sign in to upload and parse receipt images');
+    }
   };
 
   const triggerFileSelect = () => {
-    fileInputRef.current.click();
+    requireAuth(() => {
+      fileInputRef.current.click();
+    }, 'Sign in to upload and scan receipts with OCR');
   };
 
   const runOcrScan = async () => {
@@ -285,7 +291,7 @@ export default function OcrScanner() {
                   type="file" 
                   ref={fileInputRef} 
                   onChange={handleFileChange} 
-                  accept="image/jpeg,image/png,image/webp,image/avif,image/*"
+                  accept="image/jpeg,image/png,image/webp,image/avif"
                   style={{ display: 'none' }} 
                 />
               </div>

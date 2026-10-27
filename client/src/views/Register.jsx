@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, Sun, Moon, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Eye, EyeOff, Sun, Moon, AlertCircle, CheckCircle2, ArrowLeft } from 'lucide-react';
+import BrandMark from '../components/BrandMark';
+import { useAuth } from '../context/AuthContext';
 
 export default function Register({ onLoginSuccess, darkMode, onToggleDark }) {
   const [username, setUsername] = useState('');
@@ -12,6 +14,7 @@ export default function Register({ onLoginSuccess, darkMode, onToggleDark }) {
   const [success, setSuccess] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
+  const auth = useAuth();
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -49,8 +52,12 @@ export default function Register({ onLoginSuccess, darkMode, onToggleDark }) {
           localStorage.setItem('spendx_user', JSON.stringify(data.user));
         }
         setTimeout(() => {
-          onLoginSuccess(data.token, data.user);
-          navigate('/');
+          if (auth?.handleLoginSuccess) {
+            auth.handleLoginSuccess(data.token, data.user);
+          } else if (onLoginSuccess) {
+            onLoginSuccess(data.token, data.user);
+          }
+          navigate('/dashboard');
         }, 800);
       } else {
         setTimeout(() => navigate('/login'), 1200);
@@ -66,36 +73,42 @@ export default function Register({ onLoginSuccess, darkMode, onToggleDark }) {
     <div className="auth-container">
       {/* Top Bar with Brand Logo & Theme Switcher */}
       <header className="auth-top-header">
-        <div className="auth-brand">
-          <div className="auth-brand-icon">
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <polygon points="12 2 2 7 12 12 22 7 12 2" />
-              <polyline points="2 17 12 22 22 17" />
-              <polyline points="2 12 12 17 22 12" />
-            </svg>
+        <Link to="/" className="auth-brand" aria-label="SpendX home">
+          <span className="brand-mark">
+            <BrandMark />
+          </span>
+          <div className="auth-brand-text-col">
+            <span className="auth-brand-name">SpendX</span>
+            <span className="auth-brand-tag">Finance Workspace</span>
           </div>
-          <span className="auth-brand-name">SpendX</span>
-        </div>
+        </Link>
 
-        {onToggleDark && (
-          <button
-            type="button"
-            className="theme-toggle-btn"
-            onClick={onToggleDark}
-            title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-            aria-label="Toggle theme"
-          >
-            {darkMode ? <Sun size={18} style={{ color: '#fbbf24' }} /> : <Moon size={18} style={{ color: '#2563eb' }} />}
-          </button>
-        )}
+        <div className="auth-top-actions">
+          <Link to="/dashboard" className="auth-back-link">
+            <ArrowLeft size={16} />
+            <span>Guest Preview</span>
+          </Link>
+          {onToggleDark && (
+            <button
+              type="button"
+              className="theme-toggle-btn"
+              onClick={onToggleDark}
+              title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              aria-label="Toggle theme"
+            >
+              {darkMode ? <Sun size={18} style={{ color: '#fbbf24' }} /> : <Moon size={18} style={{ color: '#60a5fa' }} />}
+            </button>
+          )}
+        </div>
       </header>
 
-      {/* Centered Modern Card */}
+      {/* Centered Modern Card matching Dashboard UI */}
       <main className="auth-card-wrapper">
         <div className="auth-card">
           <div className="auth-header-texts">
-            <span className="auth-subtitle">Please enter your details</span>
+            <span className="auth-eyebrow">START FREE</span>
             <h1 className="auth-title">Create an account</h1>
+            <p className="auth-subtitle">Join SpendX to gain complete control over your money and spending habits.</p>
           </div>
 
           {error && (
@@ -176,14 +189,19 @@ export default function Register({ onLoginSuccess, darkMode, onToggleDark }) {
               className="auth-btn-primary"
               disabled={submitting}
             >
-              {submitting ? 'Creating account...' : 'Sign up'}
+              {submitting ? 'Creating account...' : 'Create account'}
             </button>
-
           </form>
 
           <div className="auth-bottom-switch">
             <span>Already have an account? </span>
             <Link to="/login">Sign in</Link>
+          </div>
+
+          <div className="auth-guest-prompt">
+          <Link to="/dashboard" className="auth-guest-link">
+              Or continue browsing as guest →
+            </Link>
           </div>
         </div>
       </main>

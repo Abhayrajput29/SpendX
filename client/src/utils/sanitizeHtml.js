@@ -3,9 +3,6 @@ const ALLOWED_TAGS = new Set([
   'BR', 'DIV', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'HR',
 ]);
 
-// Attributes that are safe to preserve (no event handlers, no src/href injection)
-const ALLOWED_ATTRS = new Set(['style', 'class']);
-
 export function sanitizeHtml(value = '') {
   if (typeof window === 'undefined') return '';
 
@@ -18,12 +15,8 @@ export function sanitizeHtml(value = '') {
       return;
     }
 
-    // Strip disallowed attributes from allowed tags
-    [...element.attributes].forEach((attr) => {
-      if (!ALLOWED_ATTRS.has(attr.name)) {
-        element.removeAttribute(attr.name);
-      }
-    });
+    // AI output is untrusted: remove all attributes, including style and class.
+    [...element.attributes].forEach((attr) => element.removeAttribute(attr.name));
   });
 
   return parsed.body.innerHTML;

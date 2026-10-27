@@ -1,20 +1,62 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
+import { randomBytes } from 'crypto';
 import User from '../models/User.js';
 import { readRawData, writeRawData } from '../services/jsonDbService.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || process.env.AUTH_SECRET || 'expensewise-jwt-secret-key-2026';
+let ephemeralDevelopmentSecret = null;
+
+function getJwtSecret() {
+  const configuredSecret = process.env.JWT_SECRET || process.env.AUTH_SECRET;
+  if (configuredSecret) return configuredSecret;
+  if (process.env.NODE_ENV === 'production' || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) return null;
+  if (!ephemeralDevelopmentSecret) ephemeralDevelopmentSecret = randomBytes(32).toString('hex');
+  return ephemeralDevelopmentSecret;
+}
+
 const TOKEN_EXPIRY = '7d';
+const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_RATE_LIMITS = new Map([
+  ['/auth/login', 10],
+  ['/auth/register', 5],
+  ['/auth/validate-username', 60],
+  ['/auth/validate-email', 60]
+]);
+const authRateBuckets = new Map();
+
+export function authRateLimit(req, res, next) {
+  const now = Date.now();
+  const key = `${req.path}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+  if (!authRateBuckets.has(key) && authRateBuckets.size >= 10000) {
+    for (const [bucketKey, value] of authRateBuckets) {
+      if (now - value.startedAt >= AUTH_RATE_WINDOW_MS) authRateBuckets.delete(bucketKey);
+    }
+    if (authRateBuckets.size >= 10000) return res.status(429).json({ error: 'Authentication service is busy. Please try again later.' });
+  }
+  let bucket = authRateBuckets.get(key);
+  if (!bucket || now - bucket.startedAt >= AUTH_RATE_WINDOW_MS) {
+    bucket = { startedAt: now, count: 0 };
+    authRateBuckets.set(key, bucket);
+  }
+  if (bucket.count >= AUTH_RATE_LIMITS.get(req.path)) {
+    res.set('Retry-After', String(Math.ceil((AUTH_RATE_WINDOW_MS - (now - bucket.startedAt)) / 1000)));
+    return res.status(429).json({ error: 'Too many authentication requests. Please try again later.' });
+  }
+  bucket.count += 1;
+  return next();
+}
 
 export function generateToken(user) {
+  const jwtSecret = getJwtSecret();
+  if (!jwtSecret) throw new Error('JWT_SECRET or AUTH_SECRET must be configured.');
   return jwt.sign(
     {
       id: user._id || user.id,
       username: user.username,
       email: user.email
     },
-    JWT_SECRET,
+    jwtSecret,
     { expiresIn: TOKEN_EXPIRY }
   );
 }
@@ -27,7 +69,9 @@ export async function authenticate(req, res, next) {
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const jwtSecret = getJwtSecret();
+    if (!jwtSecret) return res.status(503).json({ error: 'Authentication is temporarily unavailable.' });
+    const decoded = jwt.verify(token, jwtSecret);
     if (typeof decoded.id !== 'string' || decoded.id.length === 0) {
       return res.status(401).json({ error: 'Invalid or malformed authentication token' });
     }
@@ -44,9 +88,10 @@ export async function authenticate(req, res, next) {
 
 export async function register(req, res) {
   try {
+    if (!getJwtSecret()) return res.status(503).json({ error: 'Authentication is temporarily unavailable.' });
     const { username, email, password } = req.body;
 
-    if (!username || !email || !password) {
+    if (typeof username !== 'string' || typeof email !== 'string' || typeof password !== 'string' || !username || !email || !password) {
       return res.status(400).json({ error: 'Username, email, and password are required' });
     }
 
@@ -54,12 +99,12 @@ export async function register(req, res) {
       return res.status(400).json({ error: 'Username must be between 3 and 30 characters' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (password.length < 6 || Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ error: 'Password must be between 6 and 72 bytes' });
     }
 
     const emailRegex = /^\S+@\S+\.\S+$/;
-    if (!emailRegex.test(email)) {
+    if (email.length > 254 || !emailRegex.test(email)) {
       return res.status(400).json({ error: 'Please enter a valid email address' });
     }
 
@@ -143,12 +188,14 @@ export async function register(req, res) {
 
 export async function login(req, res) {
   try {
+    if (!getJwtSecret()) return res.status(503).json({ error: 'Authentication is temporarily unavailable.' });
     const { username, email, password } = req.body;
-    const identifier = (username || email || '').trim().toLowerCase();
+    const rawIdentifier = username || email || '';
 
-    if (!identifier || !password) {
+    if (typeof rawIdentifier !== 'string' || typeof password !== 'string' || !rawIdentifier || !password || rawIdentifier.length > 254 || Buffer.byteLength(password, 'utf8') > 72) {
       return res.status(400).json({ error: 'Username/Email and Password are required' });
     }
+    const identifier = rawIdentifier.trim().toLowerCase();
 
     let user = null;
 
@@ -166,8 +213,9 @@ export async function login(req, res) {
     }
 
     if (!user) {
-      // Fallback check against configured APP_PASSWORD for dev convenience
-      if (process.env.APP_PASSWORD && password === process.env.APP_PASSWORD) {
+      // Shared-password login is only available to local, non-production development.
+      const isLocalDevelopment = process.env.NODE_ENV !== 'production' && !process.env.VERCEL && !process.env.AWS_LAMBDA_FUNCTION_NAME;
+      if (isLocalDevelopment && process.env.APP_PASSWORD && password === process.env.APP_PASSWORD) {
         const devUser = { _id: 'dev_user', username: identifier || 'admin', email: 'admin@expensewise.local' };
         return res.json({
           token: generateToken(devUser),
@@ -225,7 +273,7 @@ export async function getCurrentUser(req, res) {
 export async function validateUsername(req, res) {
   try {
     const { username } = req.body;
-    if (!username || !/^[a-zA-Z0-9_]+$/.test(username)) {
+    if (typeof username !== 'string' || username.length < 3 || username.length > 30 || !/^[a-zA-Z0-9_]+$/.test(username)) {
       return res.status(400).json({ valid: false, error: 'Username must contain only letters, numbers, and underscores' });
     }
     const normalized = username.trim().toLowerCase();
@@ -249,7 +297,7 @@ export async function validateEmail(req, res) {
   try {
     const { email } = req.body;
     const emailRegex = /^\S+@\S+\.\S+$/;
-    if (!email || !emailRegex.test(email)) {
+    if (typeof email !== 'string' || email.length > 254 || !emailRegex.test(email)) {
       return res.status(400).json({ valid: false, error: 'Invalid email address' });
     }
     const normalized = email.trim().toLowerCase();

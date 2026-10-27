@@ -16,7 +16,7 @@
     "react": "^19.2.7",
     "react-chartjs-2": "^5.2.0",
     "react-dom": "^19.2.7",
-    "react-router-dom": "^6.23.1",
+    "react-router-dom": "^7.18.4",
     "vite": "^8.1.0"
   },
   "devDependencies": {

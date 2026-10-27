@@ -56,9 +56,22 @@ const TransactionSchema = new mongoose.Schema({
   isAutoCategorized: {
     type: Boolean,
     default: false
+  },
+  schedulerKey: {
+    type: String,
+    maxlength: 300,
+    immutable: true,
+    select: false
   }
 }, {
   timestamps: true
+});
+
+TransactionSchema.index({ userId: 1, date: -1 });
+TransactionSchema.index({ userId: 1, createdAt: -1 });
+TransactionSchema.index({ userId: 1, schedulerKey: 1 }, {
+  unique: true,
+  partialFilterExpression: { schedulerKey: { $type: 'string' } }
 });
 
 export default mongoose.model('Transaction', TransactionSchema);

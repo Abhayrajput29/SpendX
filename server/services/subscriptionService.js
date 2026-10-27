@@ -115,7 +115,28 @@ export function detectRecurringPayments(transactions) {
  * Iterates through all active subscriptions and creates ledger transactions if they fall due.
  * Runs on backend start or can be manually triggered.
  */
-export async function checkAndLogDueSubscriptions(jsonDbMode = false, userId = null) {
+let schedulerQueue = Promise.resolve();
+
+function advanceSubscriptionDate(date, billingCycle) {
+  const next = new Date(date);
+  if (billingCycle === 'weekly') {
+    next.setUTCDate(next.getUTCDate() + 7);
+    return next;
+  }
+
+  const day = next.getUTCDate();
+  const month = next.getUTCMonth();
+  next.setUTCDate(1);
+  if (billingCycle === 'monthly') next.setUTCMonth(month + 1);
+  else next.setUTCFullYear(next.getUTCFullYear() + 1);
+  const lastDay = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0)).getUTCDate();
+  next.setUTCDate(Math.min(day, lastDay));
+  return next;
+}
+
+async function processDueSubscriptions(jsonDbMode, userId) {
+  const MAX_CATCH_UP_PER_SUBSCRIPTION = 12;
+  const MAX_PROCESSED_PER_RUN = 100;
   const now = new Date();
   let subscriptions = [];
   
@@ -131,15 +152,22 @@ export async function checkAndLogDueSubscriptions(jsonDbMode = false, userId = n
   }
 
   let loggedCount = 0;
-  for (let sub of subscriptions) {
+  let processedCount = 0;
+  for (const sub of subscriptions) {
     if (sub.status !== 'active' || !sub.userId) continue;
 
     let subDate = new Date(sub.nextDueDate);
+    if (!Number.isFinite(subDate.getTime()) || !['weekly', 'monthly', 'yearly'].includes(sub.billingCycle) || !Number.isFinite(Number(sub.amount)) || Number(sub.amount) <= 0) {
+      console.warn('Skipping subscription with an invalid schedule:', sub._id);
+      continue;
+    }
     let modified = false;
+    let catchUpCount = 0;
 
-    // Check if subscription has fallen due (potentially multiple times if missed long duration)
-    while (subDate <= now) {
+    // Bound catch-up work so stale or malformed records cannot block the API or cron invocation.
+    while (subDate <= now && catchUpCount < MAX_CATCH_UP_PER_SUBSCRIPTION && processedCount < MAX_PROCESSED_PER_RUN) {
       // 1. Create a ledger transaction representing this invoice bill
+      const schedulerKey = `${sub._id}:${subDate.toISOString()}`;
       const newTxData = {
         description: `Recurring: ${sub.description}`,
         amount: sub.amount,
@@ -151,14 +179,23 @@ export async function checkAndLogDueSubscriptions(jsonDbMode = false, userId = n
         tags: ['subscription', 'recurring']
       };
 
+      let created = true;
       if (jsonDbMode) {
-        await jsonDb.createTransaction(sub.userId, newTxData);
+        const result = await jsonDb.createTransaction(sub.userId, newTxData, { schedulerKey, withCreationStatus: true });
+        created = result.created;
       } else {
-        const tx = new Transaction({ ...newTxData, userId: sub.userId });
-        await tx.save();
+        try {
+          const tx = new Transaction({ ...newTxData, userId: sub.userId, schedulerKey });
+          await tx.save();
+        } catch (error) {
+          if (error?.code !== 11000) throw error;
+          created = false;
+        }
       }
 
-      loggedCount++;
+      if (created) loggedCount++;
+      processedCount++;
+      catchUpCount++;
       modified = true;
 
       // Decrement remainingMonths if this is an EMI
@@ -171,13 +208,7 @@ export async function checkAndLogDueSubscriptions(jsonDbMode = false, userId = n
       }
 
       // 2. Advance the nextDueDate
-      if (sub.billingCycle === 'monthly') {
-        subDate.setMonth(subDate.getMonth() + 1);
-      } else if (sub.billingCycle === 'weekly') {
-        subDate.setDate(subDate.getDate() + 7);
-      } else if (sub.billingCycle === 'yearly') {
-        subDate.setFullYear(subDate.getFullYear() + 1);
-      }
+      subDate = advanceSubscriptionDate(subDate, sub.billingCycle);
     }
 
     if (modified) {
@@ -194,10 +225,18 @@ export async function checkAndLogDueSubscriptions(jsonDbMode = false, userId = n
         await Subscription.findOneAndUpdate({ _id: sub._id, userId: sub.userId }, updates);
       }
     }
+
+    if (processedCount >= MAX_PROCESSED_PER_RUN) break;
   }
 
   return {
     success: true,
     loggedTransactionsCount: loggedCount
   };
+}
+
+export function checkAndLogDueSubscriptions(jsonDbMode = false, userId = null) {
+  const run = schedulerQueue.then(() => processDueSubscriptions(jsonDbMode, userId));
+  schedulerQueue = run.then(() => undefined, () => undefined);
+  return run;
 }

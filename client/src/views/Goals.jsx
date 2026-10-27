@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { 
   Target, Plus, Clock, Sparkles, TrendingUp, 
   Edit2, Trash2, PiggyBank, ShieldCheck, Car, Home, Plane, 
   GraduationCap, Smartphone
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const CATEGORY_ICONS = {
   Emergency: ShieldCheck,
@@ -16,6 +17,7 @@ const CATEGORY_ICONS = {
 };
 
 export default function Goals() {
+  const { isAuthenticated, requireAuth } = useAuth();
   const [goals, setGoals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all'); // all, active, completed
@@ -41,24 +43,37 @@ export default function Goals() {
 
   const [saving, setSaving] = useState(false);
   const [calculations, setCalculations] = useState(null);
+  const fetchVersionRef = useRef(0);
 
   const fetchGoals = useCallback(async () => {
+    const requestVersion = ++fetchVersionRef.current;
+    if (!isAuthenticated) {
+      setGoals([]);
+      setShowModal(false);
+      setEditingGoal(null);
+      setDepositModalGoal(null);
+      setDepositAmount('');
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true);
       const res = await fetch('/api/goals');
       if (res.ok) {
         const data = await res.json();
-        setGoals(data);
+        if (requestVersion === fetchVersionRef.current) setGoals(data);
       }
     } catch (err) {
       console.error('Failed to fetch goals:', err);
     } finally {
-      setLoading(false);
+      if (requestVersion === fetchVersionRef.current) setLoading(false);
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
-    fetchGoals();
+    void fetchGoals();
+    return () => { fetchVersionRef.current += 1; };
   }, [fetchGoals]);
 
   // Smart Auto-Calculation Engine
@@ -101,24 +116,26 @@ export default function Goals() {
   }, [form.targetAmount, form.currentAmount, form.targetDate, form.frequency, editingGoal, form.contributionAmount]);
 
   const handleOpenCreateModal = () => {
-    // Default target date to 6 months from today
-    const sixMonthsLater = new Date();
-    sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
-    const defaultDate = sixMonthsLater.toISOString().split('T')[0];
+    requireAuth(() => {
+      // Default target date to 6 months from today
+      const sixMonthsLater = new Date();
+      sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
+      const defaultDate = sixMonthsLater.toISOString().split('T')[0];
 
-    setEditingGoal(null);
-    setForm({
-      name: '',
-      targetAmount: '50000',
-      currentAmount: '0',
-      targetDate: defaultDate,
-      frequency: 'Monthly',
-      contributionAmount: '',
-      category: 'General',
-      color: '#866ec7',
-      notes: ''
-    });
-    setShowModal(true);
+      setEditingGoal(null);
+      setForm({
+        name: '',
+        targetAmount: '50000',
+        currentAmount: '0',
+        targetDate: defaultDate,
+        frequency: 'Monthly',
+        contributionAmount: '',
+        category: 'General',
+        color: '#866ec7',
+        notes: ''
+      });
+      setShowModal(true);
+    }, 'Sign in to create personal savings goals');
   };
 
   const handleOpenEditModal = (goal) => {
@@ -213,12 +230,13 @@ export default function Goals() {
   };
 
   // Stats calculation
-  const totalTarget = goals.reduce((acc, g) => acc + (g.targetAmount || 0), 0);
-  const totalSaved = goals.reduce((acc, g) => acc + (g.currentAmount || 0), 0);
+  const visibleGoals = isAuthenticated ? goals : [];
+  const totalTarget = visibleGoals.reduce((acc, g) => acc + (g.targetAmount || 0), 0);
+  const totalSaved = visibleGoals.reduce((acc, g) => acc + (g.currentAmount || 0), 0);
   const overallPercentage = totalTarget > 0 ? Math.min(100, Math.round((totalSaved / totalTarget) * 100)) : 0;
-  const completedCount = goals.filter(g => g.isCompleted || (g.currentAmount >= g.targetAmount)).length;
+  const completedCount = visibleGoals.filter(g => g.isCompleted || (g.currentAmount >= g.targetAmount)).length;
 
-  const filteredGoals = goals.filter(g => {
+  const filteredGoals = visibleGoals.filter(g => {
     const isDone = g.isCompleted || (g.currentAmount >= g.targetAmount);
     if (filter === 'active') return !isDone;
     if (filter === 'completed') return isDone;
@@ -272,7 +290,7 @@ export default function Goals() {
           </div>
           <div className="kpi-details">
             <span className="kpi-label">Overall Progress</span>
-            <span className="kpi-value">{overallPercentage}% ({completedCount}/{goals.length} Goals)</span>
+          <span className="kpi-value">{overallPercentage}% ({completedCount}/{visibleGoals.length} Goals)</span>
           </div>
         </div>
       </div>
@@ -283,13 +301,13 @@ export default function Goals() {
           className={`btn btn-sm ${filter === 'all' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => setFilter('all')}
         >
-          All Goals ({goals.length})
+          All Goals ({visibleGoals.length})
         </button>
         <button 
           className={`btn btn-sm ${filter === 'active' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => setFilter('active')}
         >
-          Active ({goals.length - completedCount})
+          Active ({visibleGoals.length - completedCount})
         </button>
         <button 
           className={`btn btn-sm ${filter === 'completed' ? 'btn-primary' : 'btn-secondary'}`}
@@ -439,7 +457,7 @@ export default function Goals() {
       )}
 
       {/* ── CREATE / EDIT GOAL MODAL WITH AUTO-CALCULATOR ── */}
-      {showModal && (
+      {isAuthenticated && showModal && (
         <div className="modal-overlay">
           <div className="card modal-content" style={{ maxWidth: '580px', padding: '28px', maxHeight: '90vh', overflowY: 'auto' }}>
             <div className="card-header" style={{ marginBottom: '16px' }}>
@@ -604,7 +622,7 @@ export default function Goals() {
       )}
 
       {/* ── QUICK DEPOSIT MODAL ── */}
-      {depositModalGoal && (
+      {isAuthenticated && depositModalGoal && (
         <div className="modal-overlay">
           <div className="card modal-content" style={{ maxWidth: '420px', padding: '24px' }}>
             <h3 style={{ fontSize: '17px', fontWeight: 600, marginBottom: '8px', color: '#0f172a' }}>

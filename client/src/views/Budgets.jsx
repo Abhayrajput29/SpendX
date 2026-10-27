@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Edit3, ShieldAlert } from 'lucide-react';
 import { EXPENSE_CATEGORIES } from '../utils/categories';
+import { useAuth } from '../context/AuthContext';
 
 export default function Budgets() {
+  const { isAuthenticated, requireAuth } = useAuth();
   const [budgets, setBudgets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
@@ -12,12 +14,30 @@ export default function Budgets() {
   const [editingCategory, setEditingCategory] = useState('');
   const [limitValue, setLimitValue] = useState('');
   const [saving, setSaving] = useState(false);
+  const fetchVersionRef = useRef(0);
 
   const fetchBudgetData = useCallback(async () => {
+    const requestVersion = ++fetchVersionRef.current;
+    if (!isAuthenticated) {
+      const merged = EXPENSE_CATEGORIES.map(cat => ({
+        category: cat,
+        limit: 0,
+        spent: 0,
+        percentage: 0
+      }));
+      setBudgets(merged);
+      setShowEditModal(false);
+      setEditingCategory('');
+      setLimitValue('');
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true);
       // Fetch budget limits for this month
       const budgetRes = await fetch(`/api/budgets?month=${month}`);
+      if (requestVersion !== fetchVersionRef.current) return;
       let budgetLimits = [];
       if (budgetRes.ok) {
         budgetLimits = await budgetRes.json();
@@ -25,6 +45,7 @@ export default function Budgets() {
 
       // Fetch dashboard stats (contains actual spent for this month)
       const statsRes = await fetch(`/api/dashboard/stats?month=${month}`);
+      if (requestVersion !== fetchVersionRef.current) return;
       let categorySpent = [];
       if (statsRes.ok) {
         const stats = await statsRes.json();
@@ -47,22 +68,25 @@ export default function Budgets() {
         };
       });
 
-      setBudgets(merged);
+      if (requestVersion === fetchVersionRef.current) setBudgets(merged);
     } catch (err) {
       console.error('Failed to load budget data:', err);
     } finally {
-      setLoading(false);
+      if (requestVersion === fetchVersionRef.current) setLoading(false);
     }
-  }, [month]);
+  }, [isAuthenticated, month]);
 
   useEffect(() => {
     void fetchBudgetData();
+    return () => { fetchVersionRef.current += 1; };
   }, [fetchBudgetData]);
 
   const handleEditClick = (cat, currentLimit) => {
-    setEditingCategory(cat);
-    setLimitValue(currentLimit || '');
-    setShowEditModal(true);
+    requireAuth(() => {
+      setEditingCategory(cat);
+      setLimitValue(currentLimit || '');
+      setShowEditModal(true);
+    }, 'Sign in to configure category budget limits');
   };
 
   const handleSaveBudget = async (e) => {
@@ -99,7 +123,8 @@ export default function Budgets() {
     return 'var(--color-danger)'; // Red
   };
 
-  const hasExceededBudget = budgets.some(b => b.limit > 0 && b.spent > b.limit);
+  const visibleBudgets = isAuthenticated ? budgets : EXPENSE_CATEGORIES.map((category) => ({ category, limit: 0, spent: 0, percentage: 0 }));
+  const hasExceededBudget = visibleBudgets.some(b => b.limit > 0 && b.spent > b.limit);
 
   return (
     <div>
@@ -133,7 +158,7 @@ export default function Budgets() {
         <div className="card" style={{ textAlign: 'center', padding: '40px' }}>Loading budget meters...</div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '20px' }}>
-          {budgets.map((b) => {
+          {visibleBudgets.map((b) => {
             const hasLimit = b.limit > 0;
             const pct = Math.min(b.percentage, 100);
             const remaining = b.limit - b.spent;
@@ -201,7 +226,7 @@ export default function Budgets() {
       )}
 
       {/* Edit Budget Modal */}
-      {showEditModal && (
+      {isAuthenticated && showEditModal && (
         <div className="modal-overlay">
           <div className="card modal-content" style={{ padding: '30px', borderRadius: 'var(--radius-md)' }}>
             <h3 style={{ marginBottom: '10px' }}>Adjust Limit</h3>

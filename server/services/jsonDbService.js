@@ -1,14 +1,17 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { autoCategorize } from './aiService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbFilePath = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME
-  ? path.join(os.tmpdir(), 'spendx_db.json')
-  : path.join(__dirname, '../data/db.json');
+const dbFilePath = process.env.SPENDX_DB_PATH
+  ? path.resolve(process.env.SPENDX_DB_PATH)
+  : process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME
+    ? path.join(os.tmpdir(), 'spendx_db.json')
+    : path.join(__dirname, '../data/db.json');
 
 let memoryDbCache = null;
 
@@ -23,6 +26,14 @@ function emptyDbData() {
 }
 
 function normalizeDbData(data = {}) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Local database snapshot must be an object.');
+  }
+  for (const collection of ['transactions', 'budgets', 'subscriptions', 'goals', 'users']) {
+    if (data[collection] !== undefined && !Array.isArray(data[collection])) {
+      throw new Error(`Local database collection is invalid: ${collection}.`);
+    }
+  }
   return {
     ...data,
     transactions: Array.isArray(data.transactions) ? data.transactions : [],
@@ -31,6 +42,16 @@ function normalizeDbData(data = {}) {
     goals: Array.isArray(data.goals) ? data.goals : [],
     users: Array.isArray(data.users) ? data.users : []
   };
+}
+
+function cloneDbData(data) {
+  return JSON.parse(JSON.stringify(data));
+}
+
+function publicTransaction(transaction) {
+  if (!transaction) return transaction;
+  const { schedulerKey, ...visibleTransaction } = transaction;
+  return visibleTransaction;
 }
 
 function requireUserId(userId) {
@@ -49,7 +70,7 @@ function initDb() {
   const dir = path.dirname(dbFilePath);
   if (!fs.existsSync(dir)) {
     try {
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     } catch {
       // Ignore directory creation error in serverless
     }
@@ -59,7 +80,7 @@ function initDb() {
 
   try {
     const data = emptyDbData();
-    fs.writeFileSync(dbFilePath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.writeFileSync(dbFilePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
     memoryDbCache = data;
   } catch (error) {
     console.warn('JSON DB Service: Using empty in-memory database (disk write unavailable):', error.message);
@@ -71,31 +92,42 @@ function initDb() {
  * Read raw data
  */
 export function readRawData() {
-  if (memoryDbCache) return memoryDbCache;
+  if (memoryDbCache) return cloneDbData(memoryDbCache);
   initDb();
   try {
     if (fs.existsSync(dbFilePath)) {
       const raw = fs.readFileSync(dbFilePath, 'utf-8');
       const parsed = normalizeDbData(JSON.parse(raw));
       memoryDbCache = parsed;
-      return parsed;
+      return cloneDbData(parsed);
     }
   } catch (error) {
-    console.error('JSON DB Service: Failed to read local db.json; using an empty in-memory database.', error.message);
+    console.error('JSON DB Service: Failed to read local db.json; refusing to overwrite the existing snapshot.', error.message);
+    throw new Error('The local database could not be read.', { cause: error });
   }
   if (!memoryDbCache) memoryDbCache = emptyDbData();
-  return memoryDbCache;
+  return cloneDbData(memoryDbCache);
 }
 
 /**
  * Write raw data
  */
 export function writeRawData(data) {
-  memoryDbCache = data;
+  const normalized = normalizeDbData(data);
+  const temporaryPath = `${dbFilePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(dbFilePath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.mkdirSync(path.dirname(dbFilePath), { recursive: true });
+    fs.writeFileSync(temporaryPath, JSON.stringify(normalized, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(temporaryPath, dbFilePath);
+    memoryDbCache = normalized;
   } catch (error) {
-    console.warn('JSON DB Service: Saved to in-memory cache (disk write unavailable):', error.message);
+    try {
+      if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+    } catch {
+      // Preserve the original persistence error.
+    }
+    console.error('JSON DB Service: Failed to persist database update:', error.message);
+    throw new Error('The local database could not save this change.', { cause: error });
   }
 }
 
@@ -130,31 +162,45 @@ export const jsonDb = {
       amountAsc: (a, b) => a.amount - b.amount
     };
     const compare = sortComparators[sortBy] || ((a, b) => new Date(b.date) - new Date(a.date));
-    return list.sort(compare);
+    return list.sort(compare).map(publicTransaction);
   },
 
-  createTransaction: async (userId, txData) => {
+  createTransaction: async (userId, txData, options = {}) => {
     const ownerId = requireUserId(userId);
+    const schedulerKey = typeof options.schedulerKey === 'string' ? options.schedulerKey : null;
+    const withCreationStatus = options.withCreationStatus === true;
+    const result = (transaction, created) => withCreationStatus
+      ? { transaction: publicTransaction(transaction), created }
+      : publicTransaction(transaction);
+    if (schedulerKey) {
+      const existing = readRawData().transactions.find((transaction) => transaction.userId === ownerId && transaction.schedulerKey === schedulerKey);
+      if (existing) return result(existing, false);
+    }
     const { description, amount, date, paymentMethod, merchant, tags, notes, category, receiptUrl } = txData;
-    const data = readRawData();
 
     let finalCategory = category;
     let isAuto = false;
+    let aiResult = null;
 
     if (!finalCategory || finalCategory === 'Other' || finalCategory === 'Miscellaneous') {
-      const aiResult = await autoCategorize(description);
+      aiResult = await autoCategorize(description);
       finalCategory = aiResult.category;
       isAuto = true;
     }
 
     let finalMerchant = merchant;
     if (!finalMerchant) {
-      const aiResult = await autoCategorize(description);
+      if (!aiResult) aiResult = await autoCategorize(description);
       finalMerchant = aiResult.merchant;
     }
 
+    const data = readRawData();
+    if (schedulerKey) {
+      const existing = data.transactions.find((transaction) => transaction.userId === ownerId && transaction.schedulerKey === schedulerKey);
+      if (existing) return result(existing, false);
+    }
     const newTx = {
-      _id: 'mock-tx-' + Date.now(),
+      _id: 'mock-tx-' + randomUUID(),
       userId: ownerId,
       description,
       amount: parseFloat(amount),
@@ -167,12 +213,13 @@ export const jsonDb = {
       notes: notes || '',
       isAutoCategorized: isAuto,
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      ...(schedulerKey ? { schedulerKey } : {})
     };
 
     data.transactions.push(newTx);
     writeRawData(data);
-    return newTx;
+    return result(newTx, true);
   },
 
   updateTransaction: async (userId, id, updates) => {
@@ -193,7 +240,7 @@ export const jsonDb = {
 
     data.transactions[idx] = updated;
     writeRawData(data);
-    return updated;
+    return publicTransaction(updated);
   },
 
   deleteTransaction: async (userId, id) => {
@@ -291,7 +338,7 @@ export const jsonDb = {
     return {
       totalSpent,
       categoriesData,
-      recentTransactions: recent,
+      recentTransactions: recent.map(publicTransaction),
       transactionCount: thisMonthTransactions.length
     };
   },
@@ -300,35 +347,32 @@ export const jsonDb = {
     const ownerId = requireUserId(userId);
     const data = readRawData();
     const now = new Date();
-    const history = [];
-
-    // Calculate for the last 12 months
+    const months = [];
     for (let m = 11; m >= 0; m--) {
       const targetDate = new Date(now.getFullYear(), now.getMonth() - m, 15);
       const year = targetDate.getFullYear();
       const monthIndex = targetDate.getMonth();
       const monthStr = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
-
-      // Sum spent
-      const monthTxs = data.transactions.filter(t => t.userId === ownerId && t.date && t.date.slice(0, 7) === monthStr);
-      const spent = monthTxs.reduce((sum, t) => sum + t.amount, 0);
-
-      // Sum budget limits
-      const monthBudgets = data.budgets.filter(b => b.userId === ownerId && b.month === monthStr);
-      const budgetLimit = monthBudgets.reduce((sum, b) => sum + b.limit, 0);
-
-      // Get month label (e.g. "Jul 25")
-      const monthLabel = targetDate.toLocaleString('default', { month: 'short', year: '2-digit' });
-
-      history.push({
-        month: monthStr,
-        label: monthLabel,
-        spent: Math.round(spent),
-        budget: Math.round(budgetLimit)
-      });
+      months.push({ month: monthStr, label: targetDate.toLocaleString('default', { month: 'short', year: '2-digit' }) });
     }
 
-    return history;
+    const totals = new Map(months.map(({ month }) => [month, { spent: 0, budget: 0 }]));
+    for (const transaction of data.transactions) {
+      if (transaction.userId !== ownerId || !transaction.date) continue;
+      const total = totals.get(transaction.date.slice(0, 7));
+      if (total) total.spent += transaction.amount;
+    }
+    for (const budget of data.budgets) {
+      if (budget.userId !== ownerId) continue;
+      const total = totals.get(budget.month);
+      if (total) total.budget += budget.limit;
+    }
+    return months.map(({ month, label }) => ({
+      month,
+      label,
+      spent: Math.round(totals.get(month).spent),
+      budget: Math.round(totals.get(month).budget)
+    }));
   },
 
   getAllBudgets: async (userId) => {
@@ -472,9 +516,7 @@ export const jsonDb = {
       contributionAmount: updates.contributionAmount !== undefined ? parseFloat(updates.contributionAmount) : original.contributionAmount,
       updatedAt: new Date().toISOString()
     };
-    if (updated.currentAmount >= updated.targetAmount) {
-      updated.isCompleted = true;
-    }
+    updated.isCompleted = updated.currentAmount >= updated.targetAmount;
     data.goals[idx] = updated;
     writeRawData(data);
     return updated;

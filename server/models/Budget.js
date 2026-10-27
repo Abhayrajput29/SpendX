@@ -27,5 +27,6 @@ const BudgetSchema = new mongoose.Schema({
 
 // Avoid duplicate budgets per user, category, and month
 BudgetSchema.index({ userId: 1, category: 1, month: 1 }, { unique: true });
+BudgetSchema.index({ userId: 1, month: 1 });
 
 export default mongoose.model('Budget', BudgetSchema);

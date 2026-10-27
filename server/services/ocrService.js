@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import Tesseract from 'tesseract.js';
-import { getGenAI, getJsonModel } from '../utils/geminiClient.js';
+import { getGenAI, getJsonModel, GEMINI_REQUEST_TIMEOUT_MS } from '../utils/geminiClient.js';
 import { autoCategorize, CATEGORIES } from './aiService.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -209,7 +209,7 @@ export async function scanReceiptWithVision(filePath) {
   const visionModel = genAI.getGenerativeModel({
     model: modelName,
     generationConfig: { responseMimeType: 'application/json' }
-  });
+  }, { timeout: GEMINI_REQUEST_TIMEOUT_MS });
 
   const prompt = `You are an intelligent financial OCR assistant. Analyze this receipt image and extract structured transaction details.
 Allowed Categories: ${CATEGORIES.join(', ')}.
@@ -256,6 +256,7 @@ export async function scanReceiptWithTesseract(filePath) {
 
   let worker = null;
   let ocrText = '';
+  let timeoutId;
 
   try {
     // Create worker with error handler to prevent unhandled worker crashes
@@ -269,15 +270,16 @@ export async function scanReceiptWithTesseract(filePath) {
 
     // Run recognition with timeout guard
     const recognizePromise = worker.recognize(filePath);
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Tesseract OCR timeout (15s exceeded)')), 15000)
-    );
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('Tesseract OCR timeout (15s exceeded)')), 15000);
+    });
 
     const result = await Promise.race([recognizePromise, timeoutPromise]);
     ocrText = result?.data?.text || '';
   } catch (error) {
     console.warn('OCR Service: Tesseract scanning encountered error:', error.message);
   } finally {
+    clearTimeout(timeoutId);
     if (worker) {
       try {
         await worker.terminate();

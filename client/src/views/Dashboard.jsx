@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { IndianRupee, Receipt, Sparkles, Plus, ArrowRight, Wallet, CalendarDays } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -16,6 +16,7 @@ import { Doughnut, Bar } from 'react-chartjs-2';
 import { sanitizeHtml } from '../utils/sanitizeHtml';
 import { getBadgeClass } from '../utils/categoryStyles';
 import { EXPENSE_CATEGORIES } from '../utils/categories';
+import { useAuth } from '../context/AuthContext';
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, PointElement, LineElement);
 
@@ -25,15 +26,21 @@ const formatMoney = (amount) => new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 0,
 }).format(Number(amount) || 0);
 
+const EMPTY_DASHBOARD_STATS = { totalSpent: 0, categoriesData: [], recentTransactions: [], transactionCount: 0 };
+const GUEST_DASHBOARD_INSIGHT = '<h4>Portfolio Insights (Guest Preview)</h4><p>Total Spending: <strong>₹0.00</strong> across <strong>0</strong> transactions.</p><p>Sign in or sign up to record transactions, set budget targets, and get personalized AI advice.</p>';
+
 export default function Dashboard({ darkMode }) {
-  const [stats, setStats] = useState({
+  const navigate = useNavigate();
+  const { isAuthenticated, requireAuth } = useAuth();
+
+  const [storedStats, setStats] = useState({
     totalSpent: 0,
     categoriesData: [],
     recentTransactions: [],
     transactionCount: 0,
   });
-  const [aiInsight, setAiInsight] = useState('');
-  const [historyData, setHistoryData] = useState([]);
+  const [storedAiInsight, setAiInsight] = useState('');
+  const [storedHistoryData, setHistoryData] = useState([]);
   const [loadingStats, setLoadingStats] = useState(true);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [loadingAi, setLoadingAi] = useState(true);
@@ -48,22 +55,37 @@ export default function Dashboard({ darkMode }) {
     notes: '',
   });
 
+  const authEpochRef = useRef(0);
+  const previousAuthRef = useRef(isAuthenticated);
+  if (previousAuthRef.current !== isAuthenticated) {
+    previousAuthRef.current = isAuthenticated;
+    authEpochRef.current += 1;
+  }
+  const stats = isAuthenticated ? storedStats : EMPTY_DASHBOARD_STATS;
+  const aiInsight = isAuthenticated ? storedAiInsight : GUEST_DASHBOARD_INSIGHT;
+  const historyData = isAuthenticated ? storedHistoryData : [];
+
   const currentMonth = new Date().toISOString().slice(0, 7);
   const monthLabel = new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 
   const fetchStats = useCallback(async () => {
+    const requestEpoch = authEpochRef.current;
     try {
       setLoadingStats(true);
       const response = await fetch(`/api/dashboard/stats?month=${currentMonth}`);
-      if (response.ok) setStats(await response.json());
+      if (response.ok) {
+        const data = await response.json();
+        if (requestEpoch === authEpochRef.current) setStats(data);
+      }
     } catch (error) {
       console.error('Failed to fetch dashboard stats:', error);
     } finally {
-      setLoadingStats(false);
+      if (requestEpoch === authEpochRef.current) setLoadingStats(false);
     }
   }, [currentMonth]);
 
   const fetchAiInsight = useCallback(async () => {
+    const requestEpoch = authEpochRef.current;
     try {
       setLoadingAi(true);
       const response = await fetch('/api/advisor/chat', {
@@ -73,33 +95,48 @@ export default function Dashboard({ darkMode }) {
       });
       if (response.ok) {
         const data = await response.json();
-        setAiInsight(data.html);
+        if (requestEpoch === authEpochRef.current) setAiInsight(data.html);
       } else {
-        setAiInsight('<p>Unable to connect to the AI Advisor. Check your AI service setup to enable personalized insights.</p>');
+        if (requestEpoch === authEpochRef.current) setAiInsight('<p>Unable to connect to the AI Advisor. Check your AI service setup to enable personalized insights.</p>');
       }
     } catch (error) {
       console.error('Failed to fetch AI insights:', error);
-      setAiInsight('<p>The AI Advisor is offline. Your spending overview is still available.</p>');
+      if (requestEpoch === authEpochRef.current) setAiInsight('<p>The AI Advisor is offline. Your spending overview is still available.</p>');
     } finally {
-      setLoadingAi(false);
+      if (requestEpoch === authEpochRef.current) setLoadingAi(false);
     }
   }, [currentMonth]);
 
   const fetchHistory = useCallback(async () => {
+    const requestEpoch = authEpochRef.current;
     try {
       setLoadingHistory(true);
       const response = await fetch('/api/dashboard/history');
-      if (response.ok) setHistoryData(await response.json());
+      if (response.ok) {
+        const data = await response.json();
+        if (requestEpoch === authEpochRef.current) setHistoryData(data);
+      }
     } catch (error) {
       console.error('Failed to fetch dashboard history:', error);
     } finally {
-      setLoadingHistory(false);
+      if (requestEpoch === authEpochRef.current) setLoadingHistory(false);
     }
   }, []);
 
   useEffect(() => {
-    void Promise.all([fetchStats(), fetchAiInsight(), fetchHistory()]);
-  }, [fetchAiInsight, fetchHistory, fetchStats]);
+    if (isAuthenticated) {
+      void Promise.all([fetchStats(), fetchAiInsight(), fetchHistory()]);
+    } else {
+      setStats(EMPTY_DASHBOARD_STATS);
+      setHistoryData([]);
+      setAiInsight(GUEST_DASHBOARD_INSIGHT);
+      setShowAddModal(false);
+      setForm({ description: '', amount: '', category: '', paymentMethod: 'Cash', date: new Date().toISOString().split('T')[0], notes: '' });
+      setLoadingStats(false);
+      setLoadingHistory(false);
+      setLoadingAi(false);
+    }
+  }, [isAuthenticated, fetchAiInsight, fetchHistory, fetchStats]);
 
   const handleInputChange = (event) => {
     const { name, value } = event.target;
@@ -162,6 +199,7 @@ export default function Dashboard({ darkMode }) {
 
   const doughnutOptions = {
     responsive: true,
+    animation: { duration: 0 },
     plugins: {
       legend: {
         position: 'right',
@@ -203,6 +241,7 @@ export default function Dashboard({ darkMode }) {
 
   const barChartOptions = {
     responsive: true,
+    animation: { duration: 0 },
     plugins: {
       legend: { labels: { color: chartTextColor, font: { family: 'Inter', size: 12 }, usePointStyle: true, padding: 18 } },
       tooltip: {
@@ -241,7 +280,11 @@ export default function Dashboard({ darkMode }) {
             <CalendarDays size={16} aria-hidden="true" />
             <span>{monthLabel}</span>
           </div>
-          <button type="button" className="btn btn-primary" onClick={() => setShowAddModal(true)}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => requireAuth(() => setShowAddModal(true), 'Sign in to record your spending and track category budgets')}
+          >
             <Plus size={17} aria-hidden="true" /> Add expense
           </button>
         </div>
@@ -301,7 +344,14 @@ export default function Dashboard({ darkMode }) {
                 <h2>Monthly budget</h2>
                 <p>Spending against category limits</p>
               </div>
-              <Link to="/budgets" className="dashboard-text-link">Manage</Link>
+              <button
+                type="button"
+                className="dashboard-text-link"
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+                onClick={() => requireAuth(() => navigate('/budgets'), 'Sign in to configure category budget limits')}
+              >
+                Manage
+              </button>
             </div>
             <div className="budget-total-row">
               <div>
@@ -346,9 +396,14 @@ export default function Dashboard({ darkMode }) {
                 <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(aiInsight) }} />
               )}
             </div>
-            <Link to="/advisor" className="dashboard-text-link dashboard-ai-link">
+            <button
+              type="button"
+              className="dashboard-text-link dashboard-ai-link"
+              style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'left' }}
+              onClick={() => requireAuth(() => navigate('/advisor'), 'Sign in to consult the SpendX AI Advisor')}
+            >
               Open AI advisor <ArrowRight size={15} aria-hidden="true" />
-            </Link>
+            </button>
           </article>
         </div>
       </section>
@@ -418,7 +473,7 @@ export default function Dashboard({ darkMode }) {
         </article>
       </section>
 
-      {showAddModal && (
+      {isAuthenticated && showAddModal && (
         <div className="modal-overlay">
           <div className="card modal-content dashboard-expense-modal" role="dialog" aria-modal="true" aria-labelledby="add-expense-title">
             <h2 id="add-expense-title">Add an expense</h2>

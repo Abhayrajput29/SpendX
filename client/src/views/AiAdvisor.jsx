@@ -1,16 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Sparkles, Send, Loader2, RefreshCw, Calendar } from 'lucide-react';
 import { sanitizeHtml } from '../utils/sanitizeHtml';
+import { useAuth } from '../context/AuthContext';
 
 const CURRENT_MONTH = new Date().toISOString().slice(0, 7);
 
 export default function AiAdvisor() {
+  const { isAuthenticated, requireAuth } = useAuth();
   const [messages, setMessages] = useState([]);
   const [userInput, setUserInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [month, setMonth] = useState(CURRENT_MONTH);
   const [hasInitialized, setHasInitialized] = useState(false);
   const messagesEndRef = useRef(null);
+  const requestVersionRef = useRef(0);
 
   // Autoscroll chat history
   useEffect(() => {
@@ -18,6 +21,22 @@ export default function AiAdvisor() {
   }, [messages, loading]);
 
   const loadWelcomeInsight = useCallback(async (selectedMonth) => {
+    const requestVersion = ++requestVersionRef.current;
+    if (!isAuthenticated) {
+      setUserInput('');
+      setMessages([
+        {
+          sender: 'ai',
+          html: `<h4>✨ SpendX AI Financial Advisor</h4>
+                 <p>Welcome to SpendX AI Advisor! Get real-time portfolio analysis, expense categorization, and smart budget advice.</p>
+                 <p style="margin-top: 10px;">✦ <strong>Sign in</strong> or <strong>create a free account</strong> to sync your transactions and ask questions.</p>`
+        }
+      ]);
+      setLoading(false);
+      setHasInitialized(true);
+      return;
+    }
+
     try {
       setLoading(true);
       setMessages([]);
@@ -27,6 +46,7 @@ export default function AiAdvisor() {
         body: JSON.stringify({ month: selectedMonth })
       });
 
+      if (requestVersion !== requestVersionRef.current) return;
       const data = await res.json();
       const html = data.html || '<p>No insights available.</p>';
 
@@ -39,6 +59,7 @@ export default function AiAdvisor() {
         }
       ]);
     } catch (err) {
+      if (requestVersion !== requestVersionRef.current) return;
       console.error(err);
       setMessages([
         {
@@ -48,53 +69,57 @@ export default function AiAdvisor() {
         }
       ]);
     } finally {
-      setLoading(false);
-      setHasInitialized(true);
+      if (requestVersion === requestVersionRef.current) {
+        setLoading(false);
+        setHasInitialized(true);
+      }
     }
-  }, []);
+  }, [isAuthenticated]);
 
-  // Load on mount
   useEffect(() => {
-    loadWelcomeInsight(month);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void loadWelcomeInsight(month);
+  }, [loadWelcomeInsight, month]);
 
   const handleMonthChange = (newMonth) => {
     setMonth(newMonth);
-    loadWelcomeInsight(newMonth);
   };
 
   const handleSend = async (e) => {
     e.preventDefault();
     if (!userInput.trim() || loading) return;
 
-    const userText = userInput.trim();
-    setUserInput('');
+    requireAuth(async () => {
+      const userText = userInput.trim();
+      const requestVersion = ++requestVersionRef.current;
+      setUserInput('');
 
-    // Add user message to stack
-    setMessages(prev => [...prev, { sender: 'user', text: userText }]);
+      // Add user message to stack
+      setMessages(prev => [...prev, { sender: 'user', text: userText }]);
 
-    try {
-      setLoading(true);
+      try {
+        setLoading(true);
 
-      const res = await fetch('/api/advisor/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ month, question: userText })
-      });
+        const res = await fetch('/api/advisor/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ month, question: userText })
+        });
 
-      const data = await res.json();
-      const html = data.html || '<p>No response generated.</p>';
-      setMessages(prev => [...prev, { sender: 'ai', html }]);
-    } catch (err) {
-      console.error(err);
-      setMessages(prev => [...prev, {
-        sender: 'ai',
-        html: `<p>⚠️ Could not reach the server. Please check the backend is running and try again.</p>`
-      }]);
-    } finally {
-      setLoading(false);
-    }
+        if (requestVersion !== requestVersionRef.current) return;
+        const data = await res.json();
+        const html = data.html || '<p>No response generated.</p>';
+        setMessages(prev => [...prev, { sender: 'ai', html }]);
+      } catch (err) {
+        if (requestVersion !== requestVersionRef.current) return;
+        console.error(err);
+        setMessages(prev => [...prev, {
+          sender: 'ai',
+          html: `<p>⚠️ Could not reach the server. Please check the backend is running and try again.</p>`
+        }]);
+      } finally {
+        if (requestVersion === requestVersionRef.current) setLoading(false);
+      }
+    }, 'Sign in to chat with SpendX AI Advisor');
   };
 
   const QUICK_QUESTIONS = [
@@ -103,6 +128,7 @@ export default function AiAdvisor() {
     'Break down my food expenses',
     'How do I reduce my bills?',
   ];
+  const visibleMessages = isAuthenticated ? messages : [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
@@ -144,7 +170,7 @@ export default function AiAdvisor() {
 
         {/* Chat History Panel */}
         <div className="chat-messages" style={{ flexGrow: 1 }}>
-          {messages.map((msg, index) => (
+          {visibleMessages.map((msg, index) => (
             <div
               key={index}
               className={`chat-message ${msg.sender === 'user' ? 'message-user' : 'message-ai'}`}
@@ -200,7 +226,7 @@ export default function AiAdvisor() {
         <form onSubmit={handleSend} className="chat-input-area">
           <input
             type="text"
-            value={userInput}
+            value={isAuthenticated ? userInput : ''}
             onChange={(e) => setUserInput(e.target.value)}
             placeholder="e.g. Can you break down my food expenses? / Suggest a savings plan..."
             disabled={loading}

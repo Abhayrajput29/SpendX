@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   CalendarRange, Sparkles, Check, AlertCircle, Plus, Trash2, 
   Play, Pause, Calendar, IndianRupee, Tv, Wifi, Car,
@@ -6,6 +6,7 @@ import {
   HelpCircle, Clock, CheckCircle2, AlertTriangle 
 } from 'lucide-react';
 import { EXPENSE_CATEGORIES } from '../utils/categories';
+import { useAuth } from '../context/AuthContext';
 
 const getCategoryIcon = (category) => {
   switch (category) {
@@ -51,9 +52,11 @@ function createDefaultForm(isEMI = false) {
 }
 
 export default function Subscriptions() {
+  const { isAuthenticated, requireAuth } = useAuth();
   const [subscriptions, setSubscriptions] = useState([]);
   const [candidates, setCandidates] = useState([]);
-  const [avgMonthlySpent, setAvgMonthlySpent] = useState(42000);
+  const [storedAvgMonthlySpent, setAvgMonthlySpent] = useState(42000);
+  const fetchVersionRef = useRef(0);
   const [activeModal, setActiveModal] = useState(null); // 'subscription' | 'emi' | null
   const [submitting, setSubmitting] = useState(false);
   
@@ -63,19 +66,31 @@ export default function Subscriptions() {
   // Form State
   const [form, setForm] = useState(createDefaultForm());
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
+    const requestVersion = ++fetchVersionRef.current;
+    if (!isAuthenticated) {
+      setSubscriptions([]);
+      setCandidates([]);
+      setAvgMonthlySpent(42000);
+      setActiveModal(null);
+      setForm(createDefaultForm());
+      return;
+    }
+
     try {
       // Fetch Tracked Subscriptions
       const subsRes = await fetch('/api/subscriptions');
       if (subsRes.ok) {
         const subsData = await subsRes.json();
-        setSubscriptions(subsData);
+        if (requestVersion === fetchVersionRef.current) setSubscriptions(subsData);
       }
 
       // Fetch all transactions to compute average monthly spent
+      if (requestVersion !== fetchVersionRef.current) return;
       const txsRes = await fetch('/api/transactions');
       if (txsRes.ok) {
         const txsData = await txsRes.json();
+        if (requestVersion !== fetchVersionRef.current) return;
         
         // Group by month and find average monthly spent
         const monthlySpentObj = {};
@@ -89,23 +104,24 @@ export default function Subscriptions() {
         if (months.length > 0) {
           const total = months.reduce((sum, m) => sum + monthlySpentObj[m], 0);
           setAvgMonthlySpent(total / months.length);
-        }
+        } else setAvgMonthlySpent(42000);
       }
 
       // Fetch algorithmic detected subscriptions
+      if (requestVersion !== fetchVersionRef.current) return;
       const detectRes = await fetch('/api/subscriptions/detect');
       if (detectRes.ok) {
         const detectData = await detectRes.json();
-        setCandidates(detectData);
+        if (requestVersion === fetchVersionRef.current) setCandidates(detectData);
       }
     } catch (err) {
       console.error('Error fetching subscription data:', err);
     }
-  };
+  }, [isAuthenticated]);
 
   useEffect(() => {
-    fetchData();
-  }, []);
+    void fetchData();
+  }, [fetchData]);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -229,7 +245,10 @@ export default function Subscriptions() {
   };
 
   // Calculations
-  const monthlyOverhead = subscriptions
+  const visibleSubscriptions = isAuthenticated ? subscriptions : [];
+  const visibleCandidates = isAuthenticated ? candidates : [];
+  const avgMonthlySpent = isAuthenticated ? storedAvgMonthlySpent : 42000;
+  const monthlyOverhead = visibleSubscriptions
     .filter(s => (s.status || 'active') === 'active')
     .reduce((sum, s) => {
       let monthlyAmt = s.amount;
@@ -238,9 +257,9 @@ export default function Subscriptions() {
       return sum + monthlyAmt;
     }, 0);
 
-  const activeCount = subscriptions.filter(s => (s.status || 'active') === 'active').length;
-  const pausedCount = subscriptions.filter(s => (s.status || 'active') === 'paused').length;
-  const completedCount = subscriptions.filter(s => (s.status || 'active') === 'completed').length;
+  const activeCount = visibleSubscriptions.filter(s => (s.status || 'active') === 'active').length;
+  const pausedCount = visibleSubscriptions.filter(s => (s.status || 'active') === 'paused').length;
+  const completedCount = visibleSubscriptions.filter(s => (s.status || 'active') === 'completed').length;
 
   // Overhead ratio comparison against average spent
   const overheadRatio = Math.round((monthlyOverhead / (avgMonthlySpent || 1)) * 100);
@@ -263,7 +282,7 @@ export default function Subscriptions() {
   }
 
   // Filter subscriptions by selected tab category
-  const filteredSubscriptions = subscriptions.filter(sub => {
+  const filteredSubscriptions = visibleSubscriptions.filter(sub => {
     if (activeTab === 'All') return true;
     if (activeTab === 'EMIs / Loans') return !!sub.isEMI;
     if (activeTab === 'Utilities') return sub.category === 'Utilities & Bills' && !sub.isEMI;
@@ -281,14 +300,21 @@ export default function Subscriptions() {
           <p className="view-subtitle">Monitor committed expenditures and auto-log repeating invoices</p>
         </div>
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <button className="btn btn-secondary" onClick={forceRunScheduler} title="Check due bills and record them to ledger" style={{ fontSize: '12px' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={() => requireAuth(forceRunScheduler, 'Sign in to check and process due subscription bills')}
+            title="Check due bills and record them to ledger"
+            style={{ fontSize: '12px' }}
+          >
             Run Scheduler Check
           </button>
           <button 
             className="btn btn-secondary" 
             onClick={() => {
-              setForm(createDefaultForm());
-              setActiveModal('subscription');
+              requireAuth(() => {
+                setForm(createDefaultForm());
+                setActiveModal('subscription');
+              }, 'Sign in to track recurring subscriptions');
             }} 
             style={{ display: 'flex', gap: '6px', alignItems: 'center', fontSize: '12px', borderColor: 'var(--border-light)' }}
           >
@@ -297,8 +323,10 @@ export default function Subscriptions() {
           <button 
             className="btn btn-primary" 
             onClick={() => {
-              setForm(createDefaultForm(true));
-              setActiveModal('emi');
+              requireAuth(() => {
+                setForm(createDefaultForm(true));
+                setActiveModal('emi');
+              }, 'Sign in to track EMIs and loan obligations');
             }} 
             style={{ 
               display: 'flex', 
@@ -380,7 +408,7 @@ export default function Subscriptions() {
       </div>
 
       {/* Algorithmic Candidate Suggestion Banner */}
-      {candidates.length > 0 && (
+      {visibleCandidates.length > 0 && (
         <div className="card card-glowing" style={{ border: '1px solid var(--border-accent)', background: 'radial-gradient(circle at 10% 20%, rgba(14, 165, 233, 0.04) 0%, transparent 60%)' }}>
           <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: 'var(--color-primary)' }}>
             <Sparkles size={20} fill="currentColor" /> Algorithmic Pattern Suggestions
@@ -390,7 +418,7 @@ export default function Subscriptions() {
           </p>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
-            {candidates.map((cand, idx) => (
+            {visibleCandidates.map((cand, idx) => (
               <div key={idx} className="card" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px', background: 'rgba(15, 23, 42, 0.4)', border: '1px solid var(--border-light)' }}>
                 <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                   <div style={{ padding: '8px', borderRadius: '8px', backgroundColor: 'rgba(14, 165, 233, 0.1)', color: 'var(--color-primary)' }}>
@@ -640,7 +668,7 @@ export default function Subscriptions() {
       )}
 
       {/* Add Subscription Modal Dialog */}
-      {activeModal === 'subscription' && (
+      {isAuthenticated && activeModal === 'subscription' && (
         <div className="modal-overlay">
           <div className="modal-content card" style={{ borderRadius: 'var(--radius-lg)', padding: '24px', maxWidth: '500px' }}>
             <h2 style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -738,7 +766,7 @@ export default function Subscriptions() {
       )}
 
       {/* Add EMI / Loan Modal Dialog */}
-      {activeModal === 'emi' && (
+      {isAuthenticated && activeModal === 'emi' && (
         <div className="modal-overlay">
           <div className="modal-content card" style={{ borderRadius: 'var(--radius-lg)', padding: '24px', maxWidth: '500px' }}>
             <h2 style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px', color: '#ec4899' }}>

@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Search, Filter, Calendar, Edit2, Trash2, Plus, Sparkles, ArrowUpDown, Receipt } from 'lucide-react';
 import { getBadgeClass } from '../utils/categoryStyles';
 import { EXPENSE_CATEGORIES } from '../utils/categories';
+import { useAuth } from '../context/AuthContext';
 
 export default function Transactions() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { isAuthenticated, requireAuth } = useAuth();
 
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const fetchVersionRef = useRef(0);
   
   // Filter states — derived from URL params so navigation always syncs them
   const [search, setSearch] = useState(() => searchParams.get('search') || '');
@@ -54,6 +57,16 @@ export default function Transactions() {
   const [saving, setSaving] = useState(false);
 
   const fetchTransactions = useCallback(async () => {
+    const requestVersion = ++fetchVersionRef.current;
+    if (!isAuthenticated) {
+      setTransactions([]);
+      setLoading(false);
+      setShowAddModal(false);
+      setShowEditModal(false);
+      setSelectedTx(null);
+      setForm({ description: '', amount: '', category: '', paymentMethod: 'Cash', date: new Date().toISOString().split('T')[0], notes: '', merchant: '', receiptUrl: '' });
+      return;
+    }
     try {
       setLoading(true);
       let queryParams = [];
@@ -66,18 +79,20 @@ export default function Transactions() {
       const res = await fetch(`/api/transactions${queryStr}`);
       if (res.ok) {
         const data = await res.json();
-        setTransactions(data);
+        if (requestVersion === fetchVersionRef.current) setTransactions(data);
       }
     } catch (err) {
       console.error('Failed to fetch transactions:', err);
     } finally {
-      setLoading(false);
+      if (requestVersion === fetchVersionRef.current) setLoading(false);
     }
-  }, [category, month, search, sortBy]);
+  }, [category, isAuthenticated, month, search, sortBy]);
 
   useEffect(() => {
     void fetchTransactions();
   }, [fetchTransactions]);
+
+  const visibleTransactions = isAuthenticated ? transactions : [];
 
   // Keep URL in sync when filters change
   const updateFilters = (newSearch, newCategory, newMonth, newSortBy) => {
@@ -211,7 +226,7 @@ export default function Transactions() {
           <h1 className="view-title">Transaction Ledger</h1>
           <p className="view-subtitle">Review, search, and manage all your expenditures and receipt scans.</p>
         </div>
-        <button className="btn btn-primary" onClick={() => { resetForm(); setShowAddModal(true); }}>
+        <button className="btn btn-primary" onClick={() => requireAuth(() => { resetForm(); setShowAddModal(true); }, 'Sign in to add and categorize transactions')}>
           <Plus size={18} /> Add Record
         </button>
       </div>
@@ -271,7 +286,7 @@ export default function Transactions() {
       {/* Filter Status Pill Bar */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', padding: '0 4px', fontSize: '13px', color: 'var(--text-secondary)' }}>
         <div>
-          Showing <strong>{transactions.length}</strong> {transactions.length === 1 ? 'transaction' : 'transactions'}
+          Showing <strong>{visibleTransactions.length}</strong> {visibleTransactions.length === 1 ? 'transaction' : 'transactions'}
           {month ? ` for ${new Date(month + '-15').toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}` : ' (All Time)'}
           {search ? ` matching "${search}"` : ''}
           {category ? ` in ${category}` : ''}
@@ -293,7 +308,7 @@ export default function Transactions() {
         <div className="table-container">
           {loading ? (
             <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>Loading ledger data...</div>
-          ) : transactions.length > 0 ? (
+          ) : visibleTransactions.length > 0 ? (
             <table className="transaction-table">
               <thead>
                 <tr>
@@ -306,7 +321,7 @@ export default function Transactions() {
                 </tr>
               </thead>
               <tbody>
-                {transactions.map((tx) => (
+                {visibleTransactions.map((tx) => (
                   <tr key={tx._id || tx.id}>
                     <td>{new Date(tx.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</td>
                     <td>
@@ -373,7 +388,7 @@ export default function Transactions() {
       </div>
 
       {/* Add Modal */}
-      {showAddModal && (
+      {isAuthenticated && showAddModal && (
         <div className="modal-overlay">
           <div className="card modal-content" style={{ padding: '30px', borderRadius: 'var(--radius-md)' }}>
             <h3 style={{ marginBottom: '20px' }}>Create Ledger Record</h3>
@@ -476,7 +491,7 @@ export default function Transactions() {
       )}
 
       {/* Edit Modal */}
-      {showEditModal && (
+      {isAuthenticated && showEditModal && (
         <div className="modal-overlay">
           <div className="card modal-content" style={{ padding: '30px', borderRadius: 'var(--radius-md)' }}>
             <h3 style={{ marginBottom: '20px' }}>Edit Ledger Record</h3>

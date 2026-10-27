@@ -12,6 +12,7 @@ const MODEL_CASCADE = [
   'gemini-1.5-flash',
   'gemini-1.5-flash-8b',
 ];
+export const GEMINI_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * Extract the server-suggested retry delay (in ms) from a 429 error.
@@ -61,7 +62,7 @@ export async function generateContentWithRetry(model, prompt, retries = 3, baseD
       const isRetryable = is429 || is503;
 
       if (isRetryable && i < retries) {
-        const waitMs = is429 ? extractRetryDelayMs(error, delay) : delay;
+        const waitMs = Math.min(is429 ? extractRetryDelayMs(error, delay) : delay, 10_000);
         console.warn(
           `Gemini API: ${is429 ? 'Quota/rate-limit' : 'Overloaded'} (attempt ${i + 1}/${retries}). ` +
           `Waiting ${waitMs}ms before retry...`
@@ -93,11 +94,11 @@ if (geminiApiKey) {
     // Pre-warm the primary model
     const primary = MODEL_CASCADE[0];
     _modelCache[primary] = {
-      text: _genAI.getGenerativeModel({ model: primary }),
+      text: _genAI.getGenerativeModel({ model: primary }, { timeout: GEMINI_REQUEST_TIMEOUT_MS }),
       json: _genAI.getGenerativeModel({
         model: primary,
         generationConfig: { responseMimeType: 'application/json' },
-      }),
+      }, { timeout: GEMINI_REQUEST_TIMEOUT_MS }),
     };
 
     console.log(`Gemini Client: initialized (primary model: ${primary}, cascade: ${MODEL_CASCADE.join(' → ')}).`);
@@ -117,11 +118,11 @@ function getModel(modelName, type) {
   if (!_genAI) return null;
   if (!_modelCache[modelName]) {
     _modelCache[modelName] = {
-      text: _genAI.getGenerativeModel({ model: modelName }),
+      text: _genAI.getGenerativeModel({ model: modelName }, { timeout: GEMINI_REQUEST_TIMEOUT_MS }),
       json: _genAI.getGenerativeModel({
         model: modelName,
         generationConfig: { responseMimeType: 'application/json' },
-      }),
+      }, { timeout: GEMINI_REQUEST_TIMEOUT_MS }),
     };
   }
   return _modelCache[modelName][type];

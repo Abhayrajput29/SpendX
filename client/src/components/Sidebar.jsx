@@ -11,13 +11,16 @@ import {
   Sliders,
   User,
   LogOut,
+  LogIn,
 } from 'lucide-react';
+import BrandMark from './BrandMark';
+import { useAuth } from '../context/AuthContext';
 
 const navigationGroups = [
   {
     title: 'Workspace',
     items: [
-      { label: 'Overview', to: '/', icon: LayoutDashboard, end: true },
+      { label: 'Overview', to: '/dashboard', icon: LayoutDashboard, end: true },
       { label: 'Transactions', to: '/transactions', icon: Receipt },
       { label: 'Budgets', to: '/budgets', icon: PiggyBank },
       { label: 'Savings goals', to: '/goals', icon: Target },
@@ -41,19 +44,9 @@ const navigationGroups = [
   },
 ];
 
-function BrandMark() {
-  return (
-    <svg viewBox="0 0 32 32" aria-hidden="true" className="brand-mark-svg">
-      <path d="M8 11h5a4 4 0 0 0 4-4V6m-1 20v-1a4 4 0 0 1 4-4h4M8 21h4a4 4 0 0 0 4-4v-2a4 4 0 0 1 4-4h4" />
-      <circle cx="8" cy="11" r="2.5" />
-      <circle cx="24" cy="6" r="2.5" />
-      <circle cx="8" cy="21" r="2.5" />
-      <circle cx="24" cy="26" r="2.5" />
-    </svg>
-  );
-}
+export default function Sidebar({ collapsed, onNavigate }) {
+  const { user, isAuthenticated, logout, openAuthModal } = useAuth();
 
-export default function Sidebar({ collapsed, user, onSignOut, onNavigate }) {
   const displayName = user?.name || user?.username || 'My account';
   const displayEmail = user?.email || 'Personal workspace';
   const initials = displayName
@@ -67,8 +60,10 @@ export default function Sidebar({ collapsed, user, onSignOut, onNavigate }) {
   return (
     <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`} id="sidebar" aria-label="Main navigation">
       <div className="sidebar-header">
-        <NavLink to="/" className="sidebar-brand" onClick={onNavigate} aria-label="SpendX overview">
-          <span className="brand-mark"><BrandMark /></span>
+        <NavLink to="/" className="sidebar-brand" onClick={onNavigate} aria-label="SpendX home">
+          <span className="brand-mark">
+            <BrandMark />
+          </span>
           <span className="brand-name">SpendX</span>
         </NavLink>
       </div>
@@ -99,20 +94,48 @@ export default function Sidebar({ collapsed, user, onSignOut, onNavigate }) {
       </nav>
 
       <div className="sidebar-footer">
-        <div className="user-avatar" aria-hidden="true">{initials}</div>
-        <div className="user-info">
-          <span className="user-name">{displayName}</span>
-          <span className="user-email">{displayEmail}</span>
-        </div>
-        <button
-          type="button"
-          className="sidebar-signout"
-          onClick={onSignOut}
-          title="Sign out"
-          aria-label="Sign out"
-        >
-          <LogOut size={18} aria-hidden="true" />
-        </button>
+        {isAuthenticated ? (
+          <>
+            <div className="user-avatar" aria-hidden="true">{initials}</div>
+            <div className="user-info">
+              <span className="user-name">{displayName}</span>
+              <span className="user-email">{displayEmail}</span>
+            </div>
+            <button
+              type="button"
+              className="sidebar-signout"
+              onClick={logout}
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <LogOut size={18} aria-hidden="true" />
+            </button>
+          </>
+        ) : (
+          <>
+            <div
+              className="user-avatar guest-avatar"
+              aria-hidden="true"
+              onClick={() => openAuthModal('login', 'Sign in to access your personal finance workspace')}
+              title="Guest Mode — Click to Sign In"
+            >
+              <User size={18} />
+            </div>
+            <div className="user-info">
+              <span className="user-name">Guest Mode</span>
+              <span className="user-email">Sign in to sync</span>
+            </div>
+            <button
+              type="button"
+              className="sidebar-signin-btn"
+              onClick={() => openAuthModal('login', 'Sign in to access your personal finance workspace')}
+              title="Sign in"
+              aria-label="Sign in"
+            >
+              <LogIn size={18} aria-hidden="true" />
+            </button>
+          </>
+        )}
       </div>
     </aside>
   );

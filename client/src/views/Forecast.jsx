@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { TrendingUp, Sparkles, Check, AlertCircle, Calendar, ArrowUpRight, ArrowDownRight, IndianRupee } from 'lucide-react';
 import { Line } from 'react-chartjs-2';
 import { sanitizeHtml } from '../utils/sanitizeHtml';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
+import { useAuth } from '../context/AuthContext';
 
 ChartJS.register(
   CategoryScale,
@@ -15,46 +16,59 @@ ChartJS.register(
   Filler
 );
 
-export default function Forecast() {
+export default function Forecast({ darkMode }) {
+  const { isAuthenticated, requireAuth, openAuthModal } = useAuth();
   const [forecast, setForecast] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [applying, setApplying] = useState(false);
   const [appliedSuccess, setAppliedSuccess] = useState(false);
+  const fetchVersionRef = useRef(0);
 
-  const fetchForecast = async () => {
+  const fetchForecast = useCallback(async () => {
+    const requestVersion = ++fetchVersionRef.current;
+    if (!isAuthenticated) {
+      setForecast(null);
+      setError('');
+      setAppliedSuccess(false);
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true);
       setError('');
       const res = await fetch('/api/dashboard/forecast');
+      const data = await res.json();
+      if (requestVersion !== fetchVersionRef.current) return;
       if (res.ok) {
-        const data = await res.json();
         setForecast(data);
       } else {
-        const errData = await res.json();
-        setError(errData.error || 'Failed to fetch forecasting data');
+        setError(data.error || 'Failed to fetch forecasting data');
       }
     } catch (err) {
       console.error('Forecast load error:', err);
-      setError('Failed to reach backend server. Please verify Express is online.');
+      if (requestVersion === fetchVersionRef.current) setError('Failed to reach backend server. Please verify Express is online.');
     } finally {
-      setLoading(false);
+      if (requestVersion === fetchVersionRef.current) setLoading(false);
     }
-  };
+  }, [isAuthenticated]);
 
   useEffect(() => {
-    fetchForecast();
-  }, []);
+    void fetchForecast();
+    return () => { fetchVersionRef.current += 1; };
+  }, [fetchForecast]);
 
   const handleApplyRecommendedBudgets = async () => {
     if (!forecast || !forecast.recommendations || forecast.recommendations.length === 0) return;
     
-    const nextMonthStr = forecast.projected[0]?.month;
-    if (!nextMonthStr) return;
+    requireAuth(async () => {
+      const nextMonthStr = forecast.projected[0]?.month;
+      if (!nextMonthStr) return;
 
-    try {
-      setApplying(true);
-      setAppliedSuccess(false);
+      try {
+        setApplying(true);
+        setAppliedSuccess(false);
 
       const recommendationsPayload = forecast.recommendations.map(r => ({
         category: r.category,
@@ -81,13 +95,33 @@ export default function Forecast() {
     } finally {
       setApplying(false);
     }
-  };
+  }, 'Sign in to apply AI recommended budget limits');
+};
 
   if (loading) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '80vh', gap: '16px' }}>
         <div style={{ width: '40px', height: '40px', border: '3px solid rgba(14, 165, 233, 0.2)', borderTopColor: 'var(--color-primary)', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
         <p style={{ color: 'var(--text-secondary)' }}>Calculating regression matrices and cash flow projections...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="card" style={{ padding: '32px', textAlign: 'center', maxWidth: '560px', margin: '80px auto' }}>
+        <Sparkles size={36} color="var(--color-primary)" style={{ marginBottom: '12px' }} />
+        <h2 style={{ marginBottom: '10px' }}>Sign in to view your forecast</h2>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '20px' }}>
+          Your projections use your saved transactions and budgets. Sign in or create an account to see your personalized forecast.
+        </p>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => openAuthModal('login', 'Sign in to view your personalized spending forecast')}
+        >
+          Sign in to continue
+        </button>
       </div>
     );
   }
@@ -128,6 +162,9 @@ export default function Forecast() {
     ...historical.map(h => h.budget),
     ...projected.map(p => p.recommendedBudget)
   ];
+  const chartTextColor = darkMode ? '#f2f4f5' : '#15191f';
+  const chartMutedColor = darkMode ? '#a2adb5' : '#626d78';
+  const chartGridColor = darkMode ? 'rgba(235, 242, 247, 0.09)' : 'rgba(72, 88, 102, 0.14)';
 
   const chartData = {
     labels: allLabels,
@@ -177,31 +214,31 @@ export default function Forecast() {
       legend: {
         position: 'top',
         labels: {
-          color: '#f3f4f6',
+          color: chartTextColor,
           font: { family: 'Outfit', size: 12 },
           usePointStyle: true,
           padding: 15
         }
       },
       tooltip: {
-        backgroundColor: '#070b19',
-        borderColor: 'rgba(255, 255, 255, 0.1)',
+        backgroundColor: darkMode ? '#070b19' : '#ffffff',
+        borderColor: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(21, 25, 31, 0.14)',
         borderWidth: 1,
-        titleColor: '#f3f4f6',
-        bodyColor: '#9ca3af',
+        titleColor: chartTextColor,
+        bodyColor: chartMutedColor,
         bodyFont: { family: 'Inter' },
         titleFont: { family: 'Outfit', weight: 'bold' }
       }
     },
     scales: {
       x: {
-        grid: { color: 'rgba(255, 255, 255, 0.02)' },
-        ticks: { color: '#9ca3af', font: { family: 'Inter', size: 11 } }
+        grid: { color: chartGridColor },
+        ticks: { color: chartMutedColor, font: { family: 'Inter', size: 11 } }
       },
       y: {
-        grid: { color: 'rgba(255, 255, 255, 0.05)' },
+        grid: { color: chartGridColor },
         ticks: { 
-          color: '#9ca3af', 
+          color: chartMutedColor,
           font: { family: 'Inter', size: 11 },
           callback: (value) => '₹' + value.toLocaleString('en-IN')
         }

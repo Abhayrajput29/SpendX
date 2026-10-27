@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { createHash } from 'crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import mongoose from 'mongoose';
 import Transaction from '../models/Transaction.js';
@@ -15,35 +15,68 @@ import { generateForecast } from '../services/forecastService.js';
 import Subscription from '../models/Subscription.js';
 import Goal from '../models/Goal.js';
 import { detectRecurringPayments, checkAndLogDueSubscriptions } from '../services/subscriptionService.js';
-import { authenticate, login, register, getCurrentUser, validateUsername, validateEmail } from '../middleware/auth.js';
+import { authenticate, authRateLimit, login, register, getCurrentUser, validateUsername, validateEmail } from '../middleware/auth.js';
 
 const router = express.Router();
 
-router.post('/auth/register', register);
-router.post('/auth/login', login);
-router.post('/auth/validate-username', validateUsername);
-router.post('/auth/validate-email', validateEmail);
+router.post('/auth/register', authRateLimit, register);
+router.post('/auth/login', authRateLimit, login);
+router.post('/auth/validate-username', authRateLimit, validateUsername);
+router.post('/auth/validate-email', authRateLimit, validateEmail);
+
+function hasValidCronSecret(req) {
+  const expected = process.env.CRON_SECRET;
+  const authorization = req.headers.authorization || '';
+  const supplied = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+  if (!expected || !supplied) return false;
+  const expectedBytes = Buffer.from(expected);
+  const suppliedBytes = Buffer.from(supplied);
+  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
+// Vercel Cron sends GET and authenticates with the configured CRON_SECRET.
+router.get('/subscriptions/run-scheduler', async (req, res) => {
+  if (!hasValidCronSecret(req)) return res.status(401).json({ error: 'Unauthorized scheduler request' });
+  try {
+    const result = await checkAndLogDueSubscriptions(mongoose.connection.readyState !== 1);
+    return res.json(result);
+  } catch (error) {
+    console.error('Scheduled subscription run failed:', error.message);
+    return res.status(500).json({ error: 'Scheduled subscription processing failed.' });
+  }
+});
 
 router.use(authenticate);
 router.get('/auth/me', getCurrentUser);
 
 router.use((req, res, next) => {
   const monthValues = [req.query.month, req.body?.month];
-  if (monthValues.some((month) => month !== undefined && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month))) {
+  if (monthValues.some((month) => month !== undefined && (typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)))) {
     return res.status(400).json({ error: 'Month must use YYYY-MM format' });
   }
   const amountValues = [req.body?.amount, req.body?.limit];
-  if (amountValues.some((amount) => amount !== undefined && (!Number.isFinite(Number(amount)) || Number(amount) <= 0))) {
+  if (amountValues.some((amount) => amount !== undefined && (!['number', 'string'].includes(typeof amount) || !Number.isFinite(Number(amount)) || Number(amount) <= 0))) {
     return res.status(400).json({ error: 'Amounts must be positive finite numbers' });
   }
-  if (typeof req.query.search === 'string' && req.query.search.length > 100) {
+  if (req.query.search !== undefined && (typeof req.query.search !== 'string' || req.query.search.length > 100)) {
     return res.status(400).json({ error: 'Search text is too long' });
+  }
+  if (req.query.category !== undefined && (typeof req.query.category !== 'string' || req.query.category.length > 80)) {
+    return res.status(400).json({ error: 'Category filter is invalid' });
   }
   next();
 });
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sendApiError(res, error) {
+  if (error?.name === 'ValidationError' || error?.name === 'CastError') {
+    return res.status(400).json({ error: 'Invalid request data.' });
+  }
+  console.error('API handler failed:', error);
+  return res.status(500).json({ error: 'An internal server error occurred.' });
 }
 
 function ownedQuery(req, query = {}) {
@@ -58,17 +91,98 @@ function getMonthRange(month) {
   };
 }
 
-function ownedUpdates(updates) {
+const TRANSACTION_UPDATE_FIELDS = new Set(['description', 'amount', 'date', 'paymentMethod', 'category', 'merchant', 'tags', 'notes', 'receiptUrl']);
+const SUBSCRIPTION_UPDATE_FIELDS = new Set(['description', 'amount', 'category', 'merchant', 'billingCycle', 'nextDueDate', 'status', 'paymentMethod', 'isEMI', 'tenureMonths', 'remainingMonths']);
+const GOAL_UPDATE_FIELDS = new Set(['name', 'targetAmount', 'currentAmount', 'targetDate', 'frequency', 'contributionAmount', 'category', 'color', 'notes']);
+
+function ownedUpdates(updates, allowedFields) {
   const safeUpdates = {};
   for (const [key, value] of Object.entries(updates || {})) {
-    if (key.includes('.') || key.includes('$') || key === '_id' || key === 'userId') continue;
+    if (!allowedFields.has(key) || key.includes('.') || key.includes('$') || ['_id', 'userId', '__proto__', 'constructor', 'prototype'].includes(key)) continue;
     safeUpdates[key] = value;
   }
   return safeUpdates;
 }
 
+function validateSubscriptionPayload(payload, allowPartial = false) {
+  const has = (key) => Object.prototype.hasOwnProperty.call(payload, key);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'Subscription data is invalid.';
+  if (!allowPartial && (typeof payload.description !== 'string' || !payload.description.trim() || payload.description.length > 120 || !['number', 'string'].includes(typeof payload.amount) || !Number.isFinite(Number(payload.amount)) || Number(payload.amount) <= 0)) {
+    return 'Subscription description and a positive finite amount are required.';
+  }
+  if (has('description') && (typeof payload.description !== 'string' || !payload.description.trim() || payload.description.length > 120)) return 'Subscription description is invalid.';
+  if (has('amount') && (!['number', 'string'].includes(typeof payload.amount) || !Number.isFinite(Number(payload.amount)) || Number(payload.amount) <= 0)) return 'Subscription amount must be a positive finite number.';
+  if (has('billingCycle') && !['weekly', 'monthly', 'yearly'].includes(payload.billingCycle)) return 'Subscription billing cycle is invalid.';
+  if (has('nextDueDate') && (typeof payload.nextDueDate !== 'string' || !Number.isFinite(Date.parse(payload.nextDueDate)))) return 'Subscription due date is invalid.';
+  if (has('status') && !['active', 'paused', 'cancelled', 'completed'].includes(payload.status)) return 'Subscription status is invalid.';
+  if (has('paymentMethod') && !['Cash', 'Card', 'UPI', 'NetBanking', 'Other'].includes(payload.paymentMethod)) return 'Subscription payment method is invalid.';
+  if (has('category') && (typeof payload.category !== 'string' || payload.category.length > 80)) return 'Subscription category is invalid.';
+  if (has('merchant') && (typeof payload.merchant !== 'string' || payload.merchant.length > 120)) return 'Subscription merchant is invalid.';
+  if (has('isEMI') && typeof payload.isEMI !== 'boolean' && !['true', 'false'].includes(payload.isEMI)) return 'Subscription EMI flag is invalid.';
+  for (const field of ['tenureMonths', 'remainingMonths']) {
+    if (!has(field) || payload[field] === null) continue;
+    const value = Number(payload[field]);
+    if (!Number.isSafeInteger(value) || value < (field === 'tenureMonths' ? 1 : 0) || value > 1200) return 'EMI months must be whole numbers between 0 and 1,200.';
+  }
+  if (payload.tenureMonths != null && payload.remainingMonths != null && Number(payload.remainingMonths) > Number(payload.tenureMonths)) return 'Remaining EMI months cannot exceed the total tenure.';
+  if (allowPartial && Object.keys(payload).length === 0) return 'At least one editable subscription field is required.';
+  return null;
+}
+
+function validateTransactionPayload(payload, allowPartial = false) {
+  const has = (key) => Object.prototype.hasOwnProperty.call(payload, key);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'Transaction data is invalid.';
+  if (!allowPartial && (typeof payload.description !== 'string' || !payload.description.trim() || payload.description.length > 500 || !['number', 'string'].includes(typeof payload.amount) || !Number.isFinite(Number(payload.amount)) || Number(payload.amount) <= 0)) {
+    return 'Transaction description and a positive finite amount are required.';
+  }
+  if (has('description') && (typeof payload.description !== 'string' || !payload.description.trim() || payload.description.length > 500)) return 'Transaction description is invalid.';
+  if (has('amount') && (!['number', 'string'].includes(typeof payload.amount) || !Number.isFinite(Number(payload.amount)) || Number(payload.amount) <= 0)) return 'Transaction amount must be a positive finite number.';
+  if (has('date') && (typeof payload.date !== 'string' || !Number.isFinite(Date.parse(payload.date)))) return 'Transaction date is invalid.';
+  if (has('paymentMethod') && !['Cash', 'Card', 'UPI', 'NetBanking', 'Other'].includes(payload.paymentMethod)) return 'Transaction payment method is invalid.';
+  if (has('category') && (typeof payload.category !== 'string' || payload.category.length > 80)) return 'Transaction category is invalid.';
+  if (has('merchant') && (typeof payload.merchant !== 'string' || payload.merchant.length > 120)) return 'Transaction merchant is invalid.';
+  if (has('notes') && (typeof payload.notes !== 'string' || payload.notes.length > 5000)) return 'Transaction notes are invalid.';
+  if (has('tags') && (!Array.isArray(payload.tags) || payload.tags.length > 50 || payload.tags.some((tag) => typeof tag !== 'string' || tag.length > 80))) return 'Transaction tags are invalid.';
+  if (has('receiptUrl') && (typeof payload.receiptUrl !== 'string' || (payload.receiptUrl !== '' && (!payload.receiptUrl.startsWith('/api/uploads/') || payload.receiptUrl.includes('..') || payload.receiptUrl.includes('\\'))))) return 'Receipt URL must be a local SpendX upload.';
+  if (allowPartial && Object.keys(payload).length === 0) return 'At least one editable transaction field is required.';
+  return null;
+}
+
 function receiptOwnerPrefix(userId) {
   return createHash('sha256').update(userId).digest('hex');
+}
+
+const RECEIPT_MIME_BY_EXTENSION = new Map([
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp'],
+  ['.avif', 'image/avif']
+]);
+
+function getReceiptImageMime(filePath) {
+  const header = Buffer.alloc(64);
+  let fd;
+  let bytesRead;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    bytesRead = fs.readSync(fd, header, 0, header.length, 0);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+
+  const bytes = header.subarray(0, bytesRead);
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (bytes.length >= 16 && bytes.toString('ascii', 4, 8) === 'ftyp') {
+    const brands = [bytes.toString('ascii', 8, 12)];
+    for (let offset = 16; offset + 4 <= bytes.length; offset += 4) brands.push(bytes.toString('ascii', offset, offset + 4));
+    if (brands.some((brand) => brand === 'avif' || brand === 'avis')) return 'image/avif';
+  }
+  return null;
 }
 
 // Setup Multer for receipt uploads (safe for both local filesystem and serverless /tmp)
@@ -90,7 +204,7 @@ const storage = multer.diskStorage({
     cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const uniqueSuffix = randomUUID();
     cb(null, `${receiptOwnerPrefix(req.userId)}-${uniqueSuffix}${path.extname(file.originalname)}`);
   }
 });
@@ -99,13 +213,11 @@ const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|webp|avif|heic/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype) || file.mimetype.startsWith('image/');
-    if (extname || mimetype) {
+    const expectedMime = RECEIPT_MIME_BY_EXTENSION.get(path.extname(file.originalname).toLowerCase());
+    if (expectedMime && (!file.mimetype || file.mimetype === 'application/octet-stream' || file.mimetype === expectedMime)) {
       cb(null, true);
     } else {
-      cb(new Error('Only JPG, JPEG, PNG, WEBP, and AVIF receipt images are allowed!'));
+      cb(new Error('Only JPG, JPEG, PNG, WEBP, and AVIF receipt images are allowed.'));
     }
   }
 });
@@ -149,13 +261,15 @@ router.get('/transactions', async (req, res) => {
     const transactions = await Transaction.find(query).sort(sortObj);
     res.json(transactions);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
 // Create a new transaction
 router.post('/transactions', async (req, res) => {
   try {
+    const validationError = validateTransactionPayload(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
     if (mongoose.connection.readyState !== 1) {
       const transaction = await jsonDb.createTransaction(req.userId, req.body);
       return res.status(201).json(transaction);
@@ -197,15 +311,18 @@ router.post('/transactions', async (req, res) => {
     await transaction.save();
     res.status(201).json(transaction);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
 // Update a transaction
 router.put('/transactions/:id', async (req, res) => {
   try {
+    const updates = ownedUpdates(req.body, TRANSACTION_UPDATE_FIELDS);
+    const validationError = validateTransactionPayload(updates, true);
+    if (validationError) return res.status(400).json({ error: validationError });
     if (mongoose.connection.readyState !== 1) {
-      const transaction = await jsonDb.updateTransaction(req.userId, req.params.id, ownedUpdates(req.body));
+      const transaction = await jsonDb.updateTransaction(req.userId, req.params.id, updates);
       if (!transaction) {
         return res.status(404).json({ error: 'Transaction not found' });
       }
@@ -213,7 +330,7 @@ router.put('/transactions/:id', async (req, res) => {
     }
     const transaction = await Transaction.findOneAndUpdate(
       ownedQuery(req, { _id: req.params.id }),
-      ownedUpdates(req.body),
+      updates,
       { new: true, runValidators: true }
     );
     if (!transaction) {
@@ -221,7 +338,7 @@ router.put('/transactions/:id', async (req, res) => {
     }
     res.json(transaction);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -241,7 +358,7 @@ router.delete('/transactions/:id', async (req, res) => {
     }
     res.json({ message: 'Transaction deleted successfully' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -261,7 +378,7 @@ router.get('/budgets', async (req, res) => {
     const budgets = await Budget.find(ownedQuery(req, { month }));
     res.json(budgets);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -269,23 +386,25 @@ router.get('/budgets', async (req, res) => {
 router.post('/budgets', async (req, res) => {
   try {
     const { category, limit, month } = req.body;
-    if (!category || !limit || !month) {
+    if (typeof category !== 'string' || !category.trim() || category.length > 80 || !['number', 'string'].includes(typeof limit) || !Number.isFinite(Number(limit)) || Number(limit) <= 0 || typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       return res.status(400).json({ error: 'category, limit, and month are required' });
     }
+    const normalizedCategory = category.trim();
+    const normalizedLimit = Number(limit);
     if (mongoose.connection.readyState !== 1) {
-      const budget = await jsonDb.updateBudget(req.userId, req.body);
+      const budget = await jsonDb.updateBudget(req.userId, { category: normalizedCategory, limit: normalizedLimit, month });
       return res.json(budget);
     }
 
     // Use upsert to create or update budget
     const budget = await Budget.findOneAndUpdate(
-      ownedQuery(req, { category, month }),
-      { limit, userId: req.userId },
+      ownedQuery(req, { category: normalizedCategory, month }),
+      { limit: normalizedLimit, userId: req.userId },
       { new: true, upsert: true, runValidators: true }
     );
     res.json(budget);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -361,7 +480,7 @@ router.get('/dashboard/stats', async (req, res) => {
       transactionCount: transactions.length
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -374,39 +493,41 @@ router.get('/dashboard/history', async (req, res) => {
     }
 
     const now = new Date();
-    const history = [];
-
+    const months = [];
     for (let m = 11; m >= 0; m--) {
       const targetDate = new Date(now.getFullYear(), now.getMonth() - m, 15);
       const year = targetDate.getFullYear();
       const monthIndex = targetDate.getMonth();
       const monthStr = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
-
-      const { start, end } = getMonthRange(monthStr);
-
-      // Aggregate spent
-      const txs = await Transaction.find(ownedQuery(req, {
-        date: { $gte: start, $lt: end }
-      }));
-      const spent = txs.reduce((sum, t) => sum + t.amount, 0);
-
-      // Aggregate budget limits
-      const bgts = await Budget.find(ownedQuery(req, { month: monthStr }));
-      const budgetLimit = bgts.reduce((sum, b) => sum + b.limit, 0);
-
-      const monthLabel = targetDate.toLocaleString('default', { month: 'short', year: '2-digit' });
-
-      history.push({
-        month: monthStr,
-        label: monthLabel,
-        spent: Math.round(spent),
-        budget: Math.round(budgetLimit)
-      });
+      months.push({ month: monthStr, label: targetDate.toLocaleString('default', { month: 'short', year: '2-digit' }) });
     }
 
-    res.json(history);
+    const firstMonth = months[0].month;
+    const lastMonth = months[months.length - 1].month;
+    const { start } = getMonthRange(firstMonth);
+    const { end } = getMonthRange(lastMonth);
+    const [transactions, budgets] = await Promise.all([
+      Transaction.find(ownedQuery(req, { date: { $gte: start, $lt: end } })).select('date amount').lean(),
+      Budget.find(ownedQuery(req, { month: { $gte: firstMonth, $lte: lastMonth } })).select('month limit').lean()
+    ]);
+    const totals = new Map(months.map(({ month }) => [month, { spent: 0, budget: 0 }]));
+    for (const transaction of transactions) {
+      const month = new Date(transaction.date).toISOString().slice(0, 7);
+      const total = totals.get(month);
+      if (total) total.spent += transaction.amount;
+    }
+    for (const budget of budgets) {
+      const total = totals.get(budget.month);
+      if (total) total.budget += budget.limit;
+    }
+    res.json(months.map(({ month, label }) => ({
+      month,
+      label,
+      spent: Math.round(totals.get(month).spent),
+      budget: Math.round(totals.get(month).budget)
+    })));
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -420,6 +541,12 @@ router.post('/ocr/scan', upload.single('receipt'), async (req, res) => {
     }
 
     const filePath = req.file.path;
+    const extension = path.extname(req.file.originalname).toLowerCase();
+    const expectedMime = RECEIPT_MIME_BY_EXTENSION.get(extension);
+    if (!expectedMime || getReceiptImageMime(filePath) !== expectedMime) {
+      await fs.promises.unlink(filePath).catch(() => {});
+      return res.status(400).json({ error: 'The uploaded file is not a valid supported image.' });
+    }
     // Scan receipt
     const scanResult = await scanReceipt(filePath);
 
@@ -432,21 +559,27 @@ router.post('/ocr/scan', upload.single('receipt'), async (req, res) => {
       receiptUrl
     });
   } catch (error) {
-    console.error('OCR Route error:', error);
-    res.status(500).json({ error: error.message });
+    if (req.file?.path) await fs.promises.unlink(req.file.path).catch(() => {});
+    console.error('OCR Route error:', error.message);
+    res.status(500).json({ error: 'Receipt could not be processed. Please try again.' });
   }
 });
 
 router.get('/uploads/:filename', (req, res) => {
   const filename = path.basename(req.params.filename);
+  const extension = path.extname(filename).toLowerCase();
   if (!filename.startsWith(`${receiptOwnerPrefix(req.userId)}-`)) {
     return res.status(404).json({ error: 'Receipt not found' });
   }
+  const mimeType = RECEIPT_MIME_BY_EXTENSION.get(extension);
+  if (!mimeType) return res.status(404).json({ error: 'Receipt not found' });
   let filePath = path.join(uploadsDir, filename);
   if (!fs.existsSync(filePath)) {
     filePath = path.join(__dirname, '../uploads', filename);
   }
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Receipt not found' });
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.type(mimeType);
   res.sendFile(filePath);
 });
 
@@ -458,6 +591,9 @@ router.post('/advisor/chat', async (req, res) => {
     const currentMonthDefault = new Date().toISOString().slice(0, 7);
     const month = req.body.month || currentMonthDefault;
     const question = req.body.question || req.body.message || req.body.prompt || null;
+    if (question !== null && (typeof question !== 'string' || question.length > 2000)) {
+      return res.status(400).json({ error: 'Question must be 2,000 characters or fewer.' });
+    }
 
     const { start, end } = getMonthRange(month);
 
@@ -487,7 +623,7 @@ router.post('/advisor/chat', async (req, res) => {
   } catch (error) {
     console.error('Advisor error:', error);
     // Always return a valid response — never crash with a bare 500
-    const fallbackHtml = `<p>The advisor encountered an unexpected error: <strong>${error.message || 'Unknown error'}</strong>. Please try again in a moment.</p>`;
+    const fallbackHtml = '<p>The advisor is temporarily unavailable. Please try again in a moment.</p>';
     res.status(200).json({ html: fallbackHtml });
   }
 });
@@ -510,7 +646,7 @@ router.get('/dashboard/forecast', async (req, res) => {
     res.json(forecastData);
   } catch (error) {
     console.error('Forecast Route error:', error);
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -518,15 +654,23 @@ router.get('/dashboard/forecast', async (req, res) => {
 router.post('/budgets/apply-recommendations', async (req, res) => {
   try {
     const { recommendations } = req.body; // Expect [{ category, limit, month }]
-    if (!recommendations || !Array.isArray(recommendations)) {
-      return res.status(400).json({ error: 'Recommendations list is required and must be an array.' });
+    if (!Array.isArray(recommendations) || recommendations.length > 100) {
+      return res.status(400).json({ error: 'Recommendations must be an array of no more than 100 items.' });
+    }
+    if (recommendations.length === 0) return res.json({ success: true, message: 'No recommendations to apply.' });
+    const validRecommendations = [];
+    for (const item of recommendations) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.category !== 'string' || !item.category.trim() || item.category.length > 80 || typeof item.month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(item.month) || !['number', 'string'].includes(typeof item.limit) || !Number.isFinite(Number(item.limit)) || Number(item.limit) <= 0) {
+        return res.status(400).json({ error: 'Each recommendation must contain a valid category, month, and positive limit.' });
+      }
+      validRecommendations.push({ category: item.category.trim(), month: item.month, limit: Number(item.limit) });
     }
 
     if (mongoose.connection.readyState !== 1) {
-      await jsonDb.applyBulkBudgets(req.userId, recommendations);
+      await jsonDb.applyBulkBudgets(req.userId, validRecommendations);
     } else {
       // MongoDB Bulk Write Upsert
-      const operations = recommendations.map(b => ({
+      const operations = validRecommendations.map(b => ({
         updateOne: {
           filter: ownedQuery(req, { category: b.category, month: b.month }),
           update: { $set: { limit: b.limit, userId: req.userId } },
@@ -539,7 +683,7 @@ router.post('/budgets/apply-recommendations', async (req, res) => {
     res.json({ success: true, message: 'Recommended budgets applied successfully.' });
   } catch (error) {
     console.error('Apply Recommendations Route error:', error);
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -574,7 +718,7 @@ router.get('/subscriptions/detect', async (req, res) => {
 
     res.json(filteredCandidates);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -582,16 +726,22 @@ router.get('/subscriptions/detect', async (req, res) => {
 router.post('/subscriptions/confirm', async (req, res) => {
   try {
     const { subscriptions } = req.body;
-    if (!subscriptions || !Array.isArray(subscriptions)) {
-      return res.status(400).json({ error: 'Subscriptions list is required and must be an array.' });
+    if (!Array.isArray(subscriptions) || subscriptions.length > 50 || subscriptions.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
+      return res.status(400).json({ error: 'Subscriptions must be an array of no more than 50 objects.' });
+    }
+
+    const subscriptionData = subscriptions.map((item) => ownedUpdates(item, SUBSCRIPTION_UPDATE_FIELDS));
+    for (const item of subscriptionData) {
+      const validationError = validateSubscriptionPayload(item);
+      if (validationError) return res.status(400).json({ error: validationError });
     }
 
     const results = [];
-    for (const s of subscriptions) {
+    for (const item of subscriptionData) {
       if (mongoose.connection.readyState !== 1) {
-        results.push(await jsonDb.createSubscription(req.userId, ownedUpdates(s)));
+        results.push(await jsonDb.createSubscription(req.userId, item));
       } else {
-        const sub = new Subscription({ ...ownedUpdates(s), userId: req.userId });
+        const sub = new Subscription({ ...item, userId: req.userId });
         await sub.save();
         results.push(sub);
       }
@@ -599,18 +749,18 @@ router.post('/subscriptions/confirm', async (req, res) => {
 
     res.status(201).json({ success: true, count: results.length });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
-// Force log transactions due for subscriptions
+// Signed-in users can process only their own due subscriptions.
 router.post('/subscriptions/run-scheduler', async (req, res) => {
   try {
     const jsonDbMode = mongoose.connection.readyState !== 1;
     const result = await checkAndLogDueSubscriptions(jsonDbMode, req.userId);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -624,29 +774,44 @@ router.get('/subscriptions', async (req, res) => {
     const subs = await Subscription.find(ownedQuery(req));
     res.json(subs);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
 // Create a subscription
 router.post('/subscriptions', async (req, res) => {
   try {
+    const hasId = req.body._id !== undefined;
+    if (hasId && (typeof req.body._id !== 'string' || !req.body._id || req.body._id.length > 100)) {
+      return res.status(400).json({ error: 'Subscription ID is invalid.' });
+    }
+    const updates = ownedUpdates(req.body, SUBSCRIPTION_UPDATE_FIELDS);
+    const validationError = validateSubscriptionPayload(updates, hasId);
+    if (validationError) return res.status(400).json({ error: validationError });
+
     if (mongoose.connection.readyState !== 1) {
-      if (req.body._id) {
-        const updated = await jsonDb.updateSubscription(req.userId, req.body._id, ownedUpdates(req.body));
+      if (hasId) {
+        const updated = await jsonDb.updateSubscription(req.userId, req.body._id, updates);
         if (!updated) return res.status(404).json({ error: 'Subscription not found' });
         return res.json(updated);
       }
-      const sub = await jsonDb.createSubscription(req.userId, ownedUpdates(req.body));
+      const sub = await jsonDb.createSubscription(req.userId, {
+        ...updates,
+        category: updates.category || 'Other',
+        billingCycle: updates.billingCycle || 'monthly',
+        nextDueDate: updates.nextDueDate || new Date().toISOString(),
+        status: updates.status || 'active',
+        paymentMethod: updates.paymentMethod || 'Card'
+      });
       return res.status(201).json(sub);
     }
-    const { _id, description, amount, category, merchant, billingCycle, nextDueDate, status, paymentMethod, isEMI, tenureMonths, remainingMonths } = req.body;
+    const { description, amount, category, merchant, billingCycle, nextDueDate, status, paymentMethod, isEMI, tenureMonths, remainingMonths } = req.body;
 
     let sub;
-    if (_id) {
+    if (hasId) {
       sub = await Subscription.findOneAndUpdate(
-        ownedQuery(req, { _id }),
-        ownedUpdates(req.body),
+        ownedQuery(req, { _id: req.body._id }),
+        updates,
         { new: true, runValidators: true }
       );
     } else {
@@ -660,16 +825,16 @@ router.post('/subscriptions', async (req, res) => {
         nextDueDate: nextDueDate || new Date(),
         status: status || 'active',
         paymentMethod: paymentMethod || 'Card',
-        isEMI: isEMI || false,
+        isEMI: isEMI === true || isEMI === 'true',
         tenureMonths: tenureMonths || null,
         remainingMonths: remainingMonths || null,
       });
       await sub.save();
     }
     if (!sub) return res.status(404).json({ error: 'Subscription not found' });
-    res.status(_id ? 200 : 201).json(sub);
+    res.status(hasId ? 200 : 201).json(sub);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -685,7 +850,7 @@ router.delete('/subscriptions/:id', async (req, res) => {
     if (!sub) return res.status(404).json({ error: 'Subscription not found' });
     res.json({ message: 'Subscription deleted successfully' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -702,7 +867,7 @@ router.get('/goals', async (req, res) => {
     const goals = await Goal.find(ownedQuery(req)).sort({ createdAt: -1 });
     res.json(goals);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -710,21 +875,39 @@ router.get('/goals', async (req, res) => {
 router.post('/goals', async (req, res) => {
   try {
     const { name, targetAmount, currentAmount, targetDate, frequency, contributionAmount, category, color, notes } = req.body;
-    if (!name || !targetAmount || !targetDate) {
+    if (typeof name !== 'string' || !name.trim() || name.length > 120 || !['number', 'string'].includes(typeof targetAmount) || typeof targetDate !== 'string' || !Number.isFinite(Date.parse(targetDate))) {
       return res.status(400).json({ error: 'Name, target amount, and target date are required' });
     }
 
+    const currentSource = currentAmount ?? 0;
+    const contributionSource = contributionAmount ?? 0;
+    if (!['number', 'string'].includes(typeof currentSource) || !['number', 'string'].includes(typeof contributionSource)) {
+      return res.status(400).json({ error: 'Goal amounts must be numeric values.' });
+    }
+    const targetAmountNumber = Number(targetAmount);
+    const currentAmountNumber = Number(currentSource);
+    const contributionAmountNumber = Number(contributionSource);
+    if (!Number.isFinite(targetAmountNumber) || targetAmountNumber < 1 || !Number.isFinite(currentAmountNumber) || currentAmountNumber < 0 || !Number.isFinite(contributionAmountNumber) || contributionAmountNumber < 0) {
+      return res.status(400).json({ error: 'Goal amounts must be finite non-negative numbers, with a target of at least 1.' });
+    }
+    if (frequency !== undefined && !['Weekly', 'Monthly', 'Yearly'].includes(frequency)) {
+      return res.status(400).json({ error: 'Goal frequency is invalid.' });
+    }
+    if (category !== undefined && (typeof category !== 'string' || category.length > 80)) return res.status(400).json({ error: 'Goal category is invalid.' });
+    if (color !== undefined && (typeof color !== 'string' || !/^#[\da-f]{6}$/i.test(color))) return res.status(400).json({ error: 'Goal color must be a six-digit hex color.' });
+    if (notes !== undefined && (typeof notes !== 'string' || notes.length > 5000)) return res.status(400).json({ error: 'Goal notes are too long.' });
+
     const payload = {
-      name,
-      targetAmount: Number(targetAmount),
-      currentAmount: Number(currentAmount || 0),
+      name: name.trim(),
+      targetAmount: targetAmountNumber,
+      currentAmount: currentAmountNumber,
       targetDate,
       frequency: frequency || 'Monthly',
-      contributionAmount: Number(contributionAmount || 0),
+      contributionAmount: contributionAmountNumber,
       category: category || 'General',
       color: color || '#866ec7',
       notes: notes || '',
-      isCompleted: Number(currentAmount || 0) >= Number(targetAmount)
+      isCompleted: currentAmountNumber >= targetAmountNumber
     };
 
     if (mongoose.connection.readyState !== 1) {
@@ -735,7 +918,7 @@ router.post('/goals', async (req, res) => {
     const goal = await Goal.create({ ...payload, userId: req.userId });
     res.status(201).json(goal);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -743,11 +926,30 @@ router.post('/goals', async (req, res) => {
 router.put('/goals/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = ownedUpdates(req.body);
+    const updates = ownedUpdates(req.body, GOAL_UPDATE_FIELDS);
 
-    if (updates.targetAmount) updates.targetAmount = Number(updates.targetAmount);
-    if (updates.currentAmount !== undefined) updates.currentAmount = Number(updates.currentAmount);
-    if (updates.contributionAmount !== undefined) updates.contributionAmount = Number(updates.contributionAmount);
+    for (const [field, minimum] of [['targetAmount', 1], ['currentAmount', 0], ['contributionAmount', 0]]) {
+      if (updates[field] === undefined) continue;
+      if (!['number', 'string'].includes(typeof updates[field])) return res.status(400).json({ error: 'Goal amounts must be numeric values.' });
+      const value = Number(updates[field]);
+      if (!Number.isFinite(value) || value < minimum) {
+        return res.status(400).json({ error: 'Goal amounts must be finite non-negative numbers, with a target of at least 1.' });
+      }
+      updates[field] = value;
+    }
+    if (updates.targetDate !== undefined && (typeof updates.targetDate !== 'string' || !Number.isFinite(Date.parse(updates.targetDate)))) {
+      return res.status(400).json({ error: 'Goal target date is invalid.' });
+    }
+    if (updates.frequency !== undefined && !['Weekly', 'Monthly', 'Yearly'].includes(updates.frequency)) {
+      return res.status(400).json({ error: 'Goal frequency is invalid.' });
+    }
+    if (updates.name !== undefined) {
+      if (typeof updates.name !== 'string' || !updates.name.trim() || updates.name.length > 120) return res.status(400).json({ error: 'Goal name is invalid.' });
+      updates.name = updates.name.trim();
+    }
+    if (updates.category !== undefined && (typeof updates.category !== 'string' || updates.category.length > 80)) return res.status(400).json({ error: 'Goal category is invalid.' });
+    if (updates.color !== undefined && (typeof updates.color !== 'string' || !/^#[\da-f]{6}$/i.test(updates.color))) return res.status(400).json({ error: 'Goal color must be a six-digit hex color.' });
+    if (updates.notes !== undefined && (typeof updates.notes !== 'string' || updates.notes.length > 5000)) return res.status(400).json({ error: 'Goal notes are too long.' });
 
     if (updates.targetAmount && updates.currentAmount !== undefined) {
       updates.isCompleted = updates.currentAmount >= updates.targetAmount;
@@ -763,13 +965,11 @@ router.put('/goals/:id', async (req, res) => {
     if (!goal) return res.status(404).json({ error: 'Goal not found' });
 
     Object.assign(goal, updates);
-    if (goal.currentAmount >= goal.targetAmount) {
-      goal.isCompleted = true;
-    }
+    goal.isCompleted = goal.currentAmount >= goal.targetAmount;
     await goal.save();
     res.json(goal);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -797,13 +997,11 @@ router.post('/goals/:id/contribute', async (req, res) => {
     if (!goal) return res.status(404).json({ error: 'Goal not found' });
 
     goal.currentAmount += addVal;
-    if (goal.currentAmount >= goal.targetAmount) {
-      goal.isCompleted = true;
-    }
+    goal.isCompleted = goal.currentAmount >= goal.targetAmount;
     await goal.save();
     res.json(goal);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 
@@ -821,7 +1019,7 @@ router.delete('/goals/:id', async (req, res) => {
     if (!goal) return res.status(404).json({ error: 'Goal not found' });
     res.json({ message: 'Goal deleted successfully' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return sendApiError(res, error);
   }
 });
 

@@ -7,18 +7,21 @@ const originalFetch = window.fetch.bind(window)
 const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 window.fetch = (input, init = {}) => {
-  let url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input)
-  if (apiBase && url.startsWith('/api')) {
-    url = `${apiBase}${url}`
-  }
+  const originalUrl = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input)
+  let url = originalUrl
+  if (apiBase && typeof input === 'string' && url.startsWith('/api')) url = `${apiBase}${url}`
+
+  const requestUrl = new URL(url, window.location.href)
+  const apiOrigin = apiBase ? new URL(apiBase, window.location.origin).origin : window.location.origin
+  const isApiRequest = requestUrl.origin === apiOrigin && requestUrl.pathname.startsWith('/api/')
+  const isPublicAuthRequest = isApiRequest && /^\/api\/auth\/(login|register|validate-username|validate-email)$/.test(requestUrl.pathname)
 
   const token = localStorage.getItem('spendx_token')
-  const isPublicAuthRequest = /\/api\/auth\/(login|register|validate-username|validate-email)$/.test(url)
 
-  if (!isPublicAuthRequest && token) {
-    const headers = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined))
+  if (isApiRequest && !isPublicAuthRequest && token) {
+    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined))
     headers.set('Authorization', `Bearer ${token}`)
-    return originalFetch(url, { ...init, headers }).then((response) => {
+    return originalFetch(url === originalUrl ? input : url, { ...init, headers }).then((response) => {
       if (response.status === 401) {
         localStorage.removeItem('spendx_token')
         window.dispatchEvent(new Event('spendx:session-expired'))
@@ -27,7 +30,7 @@ window.fetch = (input, init = {}) => {
     })
   }
 
-  return originalFetch(url, init)
+  return originalFetch(url === originalUrl ? input : url, init)
 }
 
 createRoot(document.getElementById('root')).render(
