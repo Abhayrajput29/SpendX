@@ -607,18 +607,7 @@ router.post('/advisor/chat', async (req, res) => {
       budgets = await Budget.find(ownedQuery(req, { month }));
     }
 
-    // If the current month has no data, supplement with recent all-time transactions
-    // so the AI always has meaningful context to analyse
-    if (transactions.length === 0) {
-      if (mongoose.connection.readyState !== 1) {
-        const allTx = await jsonDb.getTransactions(req.userId, {});
-        transactions = allTx.slice(-50); // last 50 across all time
-      } else {
-        transactions = await Transaction.find(ownedQuery(req)).sort({ date: -1 }).limit(50);
-      }
-    }
-
-    const htmlInsights = await getFinancialAdvisorInsights(transactions, budgets, question);
+    const htmlInsights = await getFinancialAdvisorInsights(transactions, budgets, question, month);
     res.json({ html: htmlInsights });
   } catch (error) {
     console.error('Advisor error:', error);

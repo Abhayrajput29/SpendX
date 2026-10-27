@@ -4,7 +4,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import Tesseract from 'tesseract.js';
 import { getGenAI, getJsonModel, GEMINI_REQUEST_TIMEOUT_MS } from '../utils/geminiClient.js';
-import { autoCategorize, CATEGORIES } from './aiService.js';
+import { autoCategorize, CATEGORIES, localCategorize } from './aiService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -168,6 +168,8 @@ OCR Text:
 ${ocrText}
 """
 
+Choose the category based on the merchant's actual business or the items purchased. Do not guess Food & Dining when the merchant or purpose is unclear; use Miscellaneous instead. Ride-hailing, taxi, auto-rickshaw and bike-taxi services such as Rapido, Namma Yatri, BluSmart, Ola and Uber rides are Transport & Auto.
+
 Please extract:
 1. Merchant Name
 2. Transaction Date (formatted as YYYY-MM-DD)
@@ -213,6 +215,7 @@ export async function scanReceiptWithVision(filePath) {
 
   const prompt = `You are an intelligent financial OCR assistant. Analyze this receipt image and extract structured transaction details.
 Allowed Categories: ${CATEGORIES.join(', ')}.
+Choose the category from the merchant's actual business or items, not a guess. Do not default unknown merchants to Food & Dining; use Miscellaneous when unclear. Ride-hailing, taxi, auto-rickshaw and bike-taxi services such as Rapido, Namma Yatri, BluSmart, Ola and Uber rides are Transport & Auto.
 
 Return valid JSON with:
 {
@@ -308,7 +311,10 @@ export async function scanReceipt(imageInput) {
       const visionResult = await scanReceiptWithVision(imageInput);
       console.log('OCR Service: Successfully parsed receipt with Gemini Vision.');
 
-      if (!visionResult.category || visionResult.category === 'Miscellaneous') {
+      const ruleCategory = localCategorize(visionResult.merchant).category;
+      if (ruleCategory !== 'Miscellaneous') {
+        visionResult.category = ruleCategory;
+      } else if (!visionResult.category || visionResult.category === 'Miscellaneous') {
         const cat = await autoCategorize(visionResult.merchant);
         visionResult.category = cat.category;
       }
@@ -345,9 +351,13 @@ export async function scanReceipt(imageInput) {
     parsedData.engine = 'tesseract-regex';
   }
 
-  if (!parsedData.category || parsedData.category === 'Miscellaneous') {
+  const merchantDescription = parsedData.merchant || ocrText.slice(0, 100);
+  const ruleCategory = localCategorize(merchantDescription).category;
+  if (ruleCategory !== 'Miscellaneous') {
+    parsedData.category = ruleCategory;
+  } else if (!parsedData.category || parsedData.category === 'Miscellaneous') {
     try {
-      const categorization = await autoCategorize(parsedData.merchant || ocrText.slice(0, 100));
+      const categorization = await autoCategorize(merchantDescription);
       parsedData.category = categorization.category;
     } catch {
       parsedData.category = 'Miscellaneous';
