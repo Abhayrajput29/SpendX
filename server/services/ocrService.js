@@ -3,8 +3,12 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import Tesseract from 'tesseract.js';
-import { getGenAI, getJsonModel, GEMINI_REQUEST_TIMEOUT_MS } from '../utils/geminiClient.js';
-import { autoCategorize, CATEGORIES, localCategorize } from './aiService.js';
+import { getGenAI, getJsonModel } from '../utils/geminiClient.js';
+import { CATEGORIES, localCategorize } from './aiService.js';
+
+const RECEIPT_GEMINI_TIMEOUT_MS = 8_000;
+const RECEIPT_TEXT_PARSE_TIMEOUT_MS = 4_000;
+const TESSERACT_START_TIMEOUT_MS = 15_000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -158,8 +162,14 @@ export function parseReceiptWithRegex(ocrText) {
 /**
  * Parse receipt text using Gemini JSON model
  */
-export async function parseReceiptWithGemini(ocrText) {
-  const geminiModel = getJsonModel();
+export async function parseReceiptWithGemini(ocrText, timeoutMs = RECEIPT_TEXT_PARSE_TIMEOUT_MS) {
+  const genAI = getGenAI();
+  const geminiModel = genAI
+    ? genAI.getGenerativeModel({
+      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite',
+      generationConfig: { responseMimeType: 'application/json' },
+    }, { timeout: timeoutMs })
+    : getJsonModel();
   if (!geminiModel) throw new Error('Gemini API not initialized');
 
   const prompt = `You are an expert receipt parser. Given the following raw OCR text extracted from a receipt, parse it into structured JSON.
@@ -211,7 +221,7 @@ export async function scanReceiptWithVision(filePath) {
   const visionModel = genAI.getGenerativeModel({
     model: modelName,
     generationConfig: { responseMimeType: 'application/json' }
-  }, { timeout: GEMINI_REQUEST_TIMEOUT_MS });
+  }, { timeout: RECEIPT_GEMINI_TIMEOUT_MS });
 
   const prompt = `You are an intelligent financial OCR assistant. Analyze this receipt image and extract structured transaction details.
 Allowed Categories: ${CATEGORIES.join(', ')}.
@@ -259,22 +269,37 @@ export async function scanReceiptWithTesseract(filePath) {
 
   let worker = null;
   let ocrText = '';
-  let timeoutId;
+  let startTimeoutId;
+  let recognizeTimeoutId;
 
   try {
     // Create worker with error handler to prevent unhandled worker crashes
-    worker = await Tesseract.createWorker('eng', 1, {
+    const workerPromise = Tesseract.createWorker('eng', 1, {
       gzip: false,
       langPath: trainedDataPath,
+      cachePath: trainedDataPath,
       errorHandler: (err) => {
         console.warn('OCR Service: Tesseract worker internal message:', err?.message || err);
       }
     });
+    try {
+      worker = await Promise.race([
+        workerPromise,
+        new Promise((_, reject) => {
+          startTimeoutId = setTimeout(() => reject(new Error('Tesseract worker initialization timed out')), TESSERACT_START_TIMEOUT_MS);
+        })
+      ]);
+    } catch (error) {
+      workerPromise.then((lateWorker) => lateWorker.terminate()).catch(() => {});
+      throw error;
+    } finally {
+      clearTimeout(startTimeoutId);
+    }
 
     // Run recognition with timeout guard
     const recognizePromise = worker.recognize(filePath);
     const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error('Tesseract OCR timeout (15s exceeded)')), 15000);
+      recognizeTimeoutId = setTimeout(() => reject(new Error('Tesseract OCR timeout (15s exceeded)')), 15000);
     });
 
     const result = await Promise.race([recognizePromise, timeoutPromise]);
@@ -282,7 +307,8 @@ export async function scanReceiptWithTesseract(filePath) {
   } catch (error) {
     console.warn('OCR Service: Tesseract scanning encountered error:', error.message);
   } finally {
-    clearTimeout(timeoutId);
+    clearTimeout(startTimeoutId);
+    clearTimeout(recognizeTimeoutId);
     if (worker) {
       try {
         await worker.terminate();
@@ -314,9 +340,6 @@ export async function scanReceipt(imageInput) {
       const ruleCategory = localCategorize(visionResult.merchant).category;
       if (ruleCategory !== 'Miscellaneous') {
         visionResult.category = ruleCategory;
-      } else if (!visionResult.category || visionResult.category === 'Miscellaneous') {
-        const cat = await autoCategorize(visionResult.merchant);
-        visionResult.category = cat.category;
       }
 
       return visionResult;
@@ -356,13 +379,6 @@ export async function scanReceipt(imageInput) {
   const ruleCategory = localCategorize(merchantDescription).category;
   if (ruleCategory !== 'Miscellaneous') {
     parsedData.category = ruleCategory;
-  } else if (!parsedData.category || parsedData.category === 'Miscellaneous') {
-    try {
-      const categorization = await autoCategorize(merchantDescription);
-      parsedData.category = categorization.category;
-    } catch {
-      parsedData.category = 'Miscellaneous';
-    }
   }
 
   return {
@@ -372,6 +388,7 @@ export async function scanReceipt(imageInput) {
     category: parsedData.category || 'Miscellaneous',
     items: parsedData.items || [],
     rawText: ocrText || 'Receipt processed',
-    engine: parsedData.engine || 'fallback'
+    engine: parsedData.engine || 'fallback',
+    ...(!ocrText.trim() ? { warning: 'No readable text was detected. Try a sharper, brighter receipt image or enter the fields manually.' } : {})
   };
 }

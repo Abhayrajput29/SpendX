@@ -116,16 +116,28 @@ export default function OcrScanner() {
       const formData = new FormData();
       formData.append('receipt', fileToScan);
 
-      addLog('Extracting merchant, items, amount, and date via AI vision engine...');
+      addLog('Extracting merchant, items, amount, date, and category...');
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
 
-      const res = await fetch('/api/ocr/scan', {
-        method: 'POST',
-        body: formData
-      });
+      let res;
+      try {
+        res = await fetch('/api/ocr/scan', {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal
+        });
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
 
       if (res.ok) {
         const data = await res.json();
         addLog('Temporary receipt image removed after analysis.');
+        if (data.warning) {
+          setFileError(data.warning);
+          addLog(data.warning);
+        }
         const engineLabel = data.engine === 'gemini-vision' ? 'Gemini AI Vision' : 'Tesseract OCR + Neural Parser';
         setScanEngine(engineLabel);
         addLog(`Receipt processed successfully with ${engineLabel}!`);
@@ -151,8 +163,13 @@ export default function OcrScanner() {
       }
     } catch (err) {
       console.error(err);
-      addLog('Scanning aborted: Server connection error.');
-      setFileError('Unable to connect to server. Please ensure the backend is running.');
+      if (err.name === 'AbortError') {
+        addLog('Scanning stopped after 45 seconds.');
+        setFileError('Receipt scanning took too long. Try a smaller, sharper image or check that the backend is responsive.');
+      } else {
+        addLog('Scanning aborted: Server connection error.');
+        setFileError('Unable to connect to server. Please ensure the backend is running.');
+      }
     } finally {
       setScanning(false);
     }
