@@ -332,7 +332,7 @@ export const jsonDb = {
 
     // Sort transactions by date desc and limit to 5
     const recent = [...thisMonthTransactions]
-      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .sort((a, b) => new Date(b.date) - new Date(a.date) || new Date(b.createdAt || b.date) - new Date(a.createdAt || a.date))
       .slice(0, 5);
 
     return {

@@ -351,6 +351,7 @@ export async function scanReceipt(imageInput) {
     parsedData.engine = 'tesseract-regex';
   }
 
+  if (!CATEGORIES.includes(parsedData.category)) parsedData.category = 'Miscellaneous';
   const merchantDescription = parsedData.merchant || ocrText.slice(0, 100);
   const ruleCategory = localCategorize(merchantDescription).category;
   if (ruleCategory !== 'Miscellaneous') {

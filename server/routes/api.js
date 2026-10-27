@@ -185,11 +185,11 @@ function getReceiptImageMime(filePath) {
   return null;
 }
 
-// Setup Multer for receipt uploads (safe for both local filesystem and serverless /tmp)
+// Receipt files are temporary OCR inputs; legacy receipt links remain under server/uploads.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-const uploadsDir = isServerless ? path.join(os.tmpdir(), 'spendx_uploads') : path.join(__dirname, '../uploads');
+const uploadsDir = path.join(os.tmpdir(), 'spendx_receipt_processing');
+const legacyUploadsDir = path.join(__dirname, '../uploads');
 
 if (!fs.existsSync(uploadsDir)) {
   try {
@@ -271,10 +271,10 @@ router.post('/transactions', async (req, res) => {
     const validationError = validateTransactionPayload(req.body);
     if (validationError) return res.status(400).json({ error: validationError });
     if (mongoose.connection.readyState !== 1) {
-      const transaction = await jsonDb.createTransaction(req.userId, req.body);
+      const transaction = await jsonDb.createTransaction(req.userId, { ...req.body, receiptUrl: '' });
       return res.status(201).json(transaction);
     }
-    const { description, amount, date, paymentMethod, merchant, tags, notes, category, receiptUrl } = req.body;
+    const { description, amount, date, paymentMethod, merchant, tags, notes, category } = req.body;
 
     let finalCategory = category;
     let isAuto = false;
@@ -302,7 +302,6 @@ router.post('/transactions', async (req, res) => {
       paymentMethod: paymentMethod || 'Cash',
       category: finalCategory,
       merchant: finalMerchant,
-      receiptUrl: receiptUrl || '',
       tags: tags || [],
       notes: notes || '',
       isAutoCategorized: isAuto
@@ -470,7 +469,7 @@ router.get('/dashboard/stats', async (req, res) => {
     const recentTransactions = await Transaction.find(ownedQuery(req, {
       date: { $gte: start, $lt: end }
     }))
-      .sort({ date: -1 })
+      .sort({ date: -1, createdAt: -1 })
       .limit(5);
 
     res.json({
@@ -535,34 +534,41 @@ router.get('/dashboard/history', async (req, res) => {
 
 // Upload receipt and perform scanning
 router.post('/ocr/scan', upload.single('receipt'), async (req, res) => {
+  const filePath = req.file?.path;
+  let statusCode = 200;
+  let responseBody;
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'Please upload a receipt image!' });
+      statusCode = 400;
+      responseBody = { error: 'Please upload a receipt image!' };
+    } else {
+      const extension = path.extname(req.file.originalname).toLowerCase();
+      const expectedMime = RECEIPT_MIME_BY_EXTENSION.get(extension);
+      if (!expectedMime || getReceiptImageMime(filePath) !== expectedMime) {
+        statusCode = 400;
+        responseBody = { error: 'The uploaded file is not a valid supported image.' };
+      } else {
+        responseBody = await scanReceipt(filePath);
+      }
     }
-
-    const filePath = req.file.path;
-    const extension = path.extname(req.file.originalname).toLowerCase();
-    const expectedMime = RECEIPT_MIME_BY_EXTENSION.get(extension);
-    if (!expectedMime || getReceiptImageMime(filePath) !== expectedMime) {
-      await fs.promises.unlink(filePath).catch(() => {});
-      return res.status(400).json({ error: 'The uploaded file is not a valid supported image.' });
-    }
-    // Scan receipt
-    const scanResult = await scanReceipt(filePath);
-
-    // Relativize path for frontend usage
-    const filename = path.basename(filePath);
-    const receiptUrl = `/api/uploads/${filename}`;
-
-    res.json({
-      ...scanResult,
-      receiptUrl
-    });
   } catch (error) {
-    if (req.file?.path) await fs.promises.unlink(req.file.path).catch(() => {});
     console.error('OCR Route error:', error.message);
-    res.status(500).json({ error: 'Receipt could not be processed. Please try again.' });
+    statusCode = 500;
+    responseBody = { error: 'Receipt could not be processed. Please try again.' };
+  } finally {
+    if (filePath) {
+      try {
+        await fs.promises.unlink(filePath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          console.error('Temporary receipt cleanup failed:', error.message);
+          statusCode = 500;
+          responseBody = { error: 'Receipt could not be removed from temporary storage. Please try again.' };
+        }
+      }
+    }
   }
+  return res.status(statusCode).json(responseBody);
 });
 
 router.get('/uploads/:filename', (req, res) => {
@@ -573,10 +579,7 @@ router.get('/uploads/:filename', (req, res) => {
   }
   const mimeType = RECEIPT_MIME_BY_EXTENSION.get(extension);
   if (!mimeType) return res.status(404).json({ error: 'Receipt not found' });
-  let filePath = path.join(uploadsDir, filename);
-  if (!fs.existsSync(filePath)) {
-    filePath = path.join(__dirname, '../uploads', filename);
-  }
+  const filePath = path.join(legacyUploadsDir, filename);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Receipt not found' });
   res.set('X-Content-Type-Options', 'nosniff');
   res.type(mimeType);

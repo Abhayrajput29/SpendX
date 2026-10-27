@@ -296,11 +296,18 @@ function buildQuestionAnswer(summary, budgetAnalysis, question, month) {
   const period = month ? `the selected month (${escapeHtml(month)})` : 'the selected month';
   const totalBudget = budgetAnalysis.reduce((sum, item) => sum + item.limit, 0);
   const budgetedSpent = budgetAnalysis.reduce((sum, item) => sum + item.spent, 0);
-  const scopedCategory = /\b(food|dining|restaurant)\b/.test(q)
-    ? 'Food & Dining'
-    : /\b(bill|bills|utility|utilities)\b/.test(q)
-      ? 'Utilities & Bills'
-      : null;
+  const categoryAliases = [
+    ['Food & Dining', /\b(food|dining|restaurant|grocer(?:y|ies))\b/],
+    ['Transport & Auto', /\b(transport|transportation|commut(?:e|ing)|taxi|ride.?hail)\b/],
+    ['Utilities & Bills', /\b(bill|bills|utility|utilities)\b/],
+    ['Shopping', /\b(shopping|shop|retail)\b/],
+    ['Entertainment', /\b(entertainment|movies?|streaming)\b/],
+    ['Healthcare & Fitness', /\b(healthcare|health|medical|fitness|gym)\b/],
+    ['Education', /\b(education|school|tuition|course)\b/],
+    ['Travel', /\b(travel|hotel|flights?)\b/],
+  ];
+  const scopedCategory = categoryAliases.find(([, pattern]) => pattern.test(q))?.[0]
+    || CATEGORIES.find((category) => q.includes(category.toLowerCase()));
   const overspendingQuestion = /\b(over\s*budget|overspend(?:ing)?|exceed(?:ed|ing)?|above\s+(?:my\s+)?(?:budget|limit)|over\s+(?:my\s+)?(?:budget|limit))\b/.test(q);
 
   if (overspendingQuestion) {
@@ -359,9 +366,31 @@ function buildQuestionAnswer(summary, budgetAnalysis, question, month) {
   }
 
   if (/\b(budget|budgets|limit|limits)\b/.test(q)) {
+    if (/\b(left|remaining|remain|available)\b/.test(q)) {
+      if (budgetAnalysis.length === 0) return `<p>No category budgets are set for ${period}.</p>`;
+      const remaining = budgetAnalysis.reduce((sum, item) => sum + item.remaining, 0);
+      const overBy = budgetAnalysis.reduce((sum, item) => sum + item.overBy, 0);
+      const overNote = overBy > 0 ? ` You are also ${formatCurrency(overBy)} over budget across exceeded categories.` : '';
+      return `<p>You have ${formatCurrency(remaining)} remaining across your category budgets for ${period}.${overNote}</p>`;
+    }
     if (budgetAnalysis.length === 0) return `<p>No category budgets are set for ${period}.</p>`;
     const overCount = budgetAnalysis.filter((item) => item.overBy > 0).length;
     return `<p>Across your ${budgetAnalysis.length} budgeted categories for ${period}, the total limit is ${formatCurrency(totalBudget)} and spending in those categories is ${formatCurrency(budgetedSpent)} (${Math.round((budgetedSpent / totalBudget) * 100)}% used). ${overCount ? `${overCount} ${overCount === 1 ? 'category is' : 'categories are'} over budget.` : 'No budgeted category is over its limit.'}</p>`;
+  }
+
+  if (/\b(merchant|store|shop)\b/.test(q) && /\b(most|highest|largest|top|spend|spent|spending|expense)\b/.test(q)) {
+    const topMerchant = Object.entries(summary.merchants || {}).sort((a, b) => b[1] - a[1])[0];
+    return topMerchant
+      ? `<p>Your highest-spend merchant for ${period} is <strong>${escapeHtml(topMerchant[0])}</strong> at ${formatCurrency(topMerchant[1])}.</p>`
+      : `<p>No merchant details are recorded for ${period}.</p>`;
+  }
+
+  if (/\b(biggest|highest|largest|most|top)\b/.test(q) && /\b(category|categories|spend|spent|spending|expense|expenses)\b/.test(q)) {
+    const topCategory = Object.entries(summary.categories).sort((a, b) => b[1] - a[1])[0];
+    if (!topCategory) return `<p>No transactions are recorded for ${period}.</p>`;
+    const status = budgetAnalysis.find((item) => item.category === topCategory[0]);
+    const budgetNote = status ? ` (${status.percentage}% of its ${formatCurrency(status.limit)} limit)` : '';
+    return `<p>Your highest-spend category for ${period} is <strong>${escapeHtml(topCategory[0])}</strong> at ${formatCurrency(topCategory[1])}${budgetNote}.</p>`;
   }
 
   if (/\b(total|spent|spending|expenses?)\b/.test(q)) {
@@ -474,9 +503,11 @@ export async function getFinancialAdvisorInsights(transactions, budgets, questio
       const category = t.category || 'Miscellaneous';
       acc.totalSpent += amount;
       acc.categories[category] = (acc.categories[category] || 0) + amount;
+      const merchant = typeof t.merchant === 'string' && t.merchant.trim() ? t.merchant.trim() : '';
+      if (merchant) acc.merchants[merchant] = (acc.merchants[merchant] || 0) + amount;
       return acc;
     },
-    { totalSpent: 0, categories: {}, txCount: transactions.length }
+    { totalSpent: 0, categories: {}, merchants: {}, txCount: transactions.length }
   );
 
   const budgetSummary = budgets.reduce((acc, b) => {
@@ -502,6 +533,10 @@ export async function getFinancialAdvisorInsights(transactions, budgets, questio
       totalSpent: parseFloat(summary.totalSpent.toFixed(2)),
       spendingByCategory: Object.fromEntries(
         Object.entries(summary.categories).map(([k, v]) => [k, parseFloat(v.toFixed(2))])
+      ),
+      spendingByMerchant: Object.fromEntries(
+        Object.entries(summary.merchants).sort((a, b) => b[1] - a[1]).slice(0, 10)
+          .map(([k, v]) => [k, parseFloat(v.toFixed(2))])
       ),
       budgets: budgetSummary,
       categoryBudgetStatus: budgetAnalysis.map(({ category, limit, spent, remaining, overBy, percentage }) => ({

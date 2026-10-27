@@ -26,7 +26,6 @@ export default function OcrScanner() {
     paymentMethod: 'Cash',
     date: '',
     merchant: '',
-    receiptUrl: '',
     notes: ''
   });
 
@@ -48,7 +47,6 @@ export default function OcrScanner() {
       paymentMethod: 'Cash',
       date: '',
       merchant: '',
-      receiptUrl: '',
       notes: ''
     });
     setParsedItems([]);
@@ -77,10 +75,12 @@ export default function OcrScanner() {
     resetForm();
     setScanLogs([]);
     addLog(`Selected receipt: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+    void runOcrScan(file);
   };
 
   const handleFileChange = (e) => {
     const [file] = e.target.files;
+    e.target.value = '';
     if (file) selectFile(file);
   };
 
@@ -102,8 +102,8 @@ export default function OcrScanner() {
     }, 'Sign in to upload and scan receipts with OCR');
   };
 
-  const runOcrScan = async () => {
-    if (!selectedFile) return;
+  const runOcrScan = async (fileToScan = selectedFile) => {
+    if (!fileToScan || scanning) return;
 
     try {
       setScanning(true);
@@ -114,7 +114,7 @@ export default function OcrScanner() {
       addLog('Uploading receipt image to backend...');
       
       const formData = new FormData();
-      formData.append('receipt', selectedFile);
+      formData.append('receipt', fileToScan);
 
       addLog('Extracting merchant, items, amount, and date via AI vision engine...');
 
@@ -125,6 +125,7 @@ export default function OcrScanner() {
 
       if (res.ok) {
         const data = await res.json();
+        addLog('Temporary receipt image removed after analysis.');
         const engineLabel = data.engine === 'gemini-vision' ? 'Gemini AI Vision' : 'Tesseract OCR + Neural Parser';
         setScanEngine(engineLabel);
         addLog(`Receipt processed successfully with ${engineLabel}!`);
@@ -139,7 +140,6 @@ export default function OcrScanner() {
           paymentMethod: 'Cash',
           date: data.date || new Date().toISOString().split('T')[0],
           merchant: data.merchant !== 'Receipt Store' ? (data.merchant || '') : '',
-          receiptUrl: data.receiptUrl || '',
           notes: itemsList.length > 0 
             ? `Items: ${itemsList.join(', ')}` 
             : (data.rawText ? data.rawText.slice(0, 150) : '')
@@ -183,8 +183,13 @@ export default function OcrScanner() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...form,
-          amount: numAmount
+          description: form.description,
+          amount: numAmount,
+          category: form.category,
+          paymentMethod: form.paymentMethod,
+          date: form.date,
+          merchant: form.merchant,
+          notes: form.notes
         })
       });
       if (res.ok) {
@@ -306,7 +311,7 @@ export default function OcrScanner() {
                   <button className="btn btn-secondary" onClick={() => { setSelectedFile(null); setPreviewUrl(null); setScanLogs([]); setFileError(''); resetForm(); }} disabled={scanning}>
                     Remove
                   </button>
-                  <button className="btn btn-primary" style={{ flexGrow: 1 }} onClick={runOcrScan} disabled={scanning}>
+                  <button className="btn btn-primary" style={{ flexGrow: 1 }} onClick={() => void runOcrScan()} disabled={scanning}>
                     {scanning ? (
                       <>
                         <Loader2 size={16} className="animate-spin" /> Scanning receipt...
@@ -352,7 +357,11 @@ export default function OcrScanner() {
           <div className="card">
             <h3>Verified Data Details</h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '20px' }}>
-              Verify and adjust the auto-parsed receipt fields before confirming.
+              {scanning
+                ? 'The receipt is being analyzed automatically. Extracted fields will appear here shortly.'
+                : scanEngine
+                  ? 'The temporary image has been removed after analysis. Verify or adjust the extracted fields before confirming.'
+                  : 'Select or drop a receipt image to analyze it temporarily. Extracted fields will appear here for you to verify.'}
             </p>
 
             {formError && (

@@ -84,12 +84,11 @@ export default function AiAdvisor() {
     setMonth(newMonth);
   };
 
-  const handleSend = async (e) => {
-    e.preventDefault();
-    if (!userInput.trim() || loading) return;
+  const sendQuestion = async (question) => {
+    const userText = question.trim();
+    if (!userText || loading) return;
 
     requireAuth(async () => {
-      const userText = userInput.trim();
       const requestVersion = ++requestVersionRef.current;
       setUserInput('');
 
@@ -107,6 +106,7 @@ export default function AiAdvisor() {
 
         if (requestVersion !== requestVersionRef.current) return;
         const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Advisor request failed (${res.status})`);
         const html = data.html || '<p>No response generated.</p>';
         setMessages(prev => [...prev, { sender: 'ai', html }]);
       } catch (err) {
@@ -122,11 +122,19 @@ export default function AiAdvisor() {
     }, 'Sign in to chat with SpendX AI Advisor');
   };
 
+  const handleSend = (e) => {
+    e.preventDefault();
+    void sendQuestion(userInput);
+  };
+
   const QUICK_QUESTIONS = [
     'Where am I overspending?',
     'Give me a savings plan',
     'Break down my food expenses',
     'How do I reduce my bills?',
+    'What is my biggest expense category?',
+    'How much budget do I have left?',
+    'Which merchant do I spend most at?',
   ];
   const visibleMessages = isAuthenticated ? messages : [];
 
@@ -200,9 +208,8 @@ export default function AiAdvisor() {
               <button
                 key={q}
                 type="button"
-                onClick={() => {
-                  setUserInput(q);
-                }}
+                onClick={() => void sendQuestion(q)}
+                title="Ask SpendX AI"
                 style={{
                   background: 'var(--bg-card-hover)',
                   border: '1px solid var(--border-color)',
